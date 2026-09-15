@@ -136,7 +136,7 @@ for archive in $archives
 
     # 2. Try 7z without password if unzip failed or non-zip
     if test $extract_status -ne 0; and command -q 7z
-        7z x -y -- "$archive" "-o$output_dir" >/tmp/unzip-all-output.txt 2>&1
+        7z x -bsp1 -y -- "$archive" "-o$output_dir"
         set extract_status $status
     end
 
@@ -144,7 +144,7 @@ for archive in $archives
     if test $extract_status -ne 0; and command -q 7z
         for password in $stored_passwords
             echo "Trying stored password..."
-            7z x -y "-p$password" -- "$archive" "-o$output_dir" >/tmp/unzip-all-output.txt 2>&1
+            7z x -bsp1 -y "-p$password" -- "$archive" "-o$output_dir"
             set extract_status $status
             if test $extract_status -eq 0
                 echo "Stored password matched."
@@ -157,7 +157,7 @@ for archive in $archives
     if test $extract_status -ne 0; and command -q 7z
         for password in $session_passwords
             echo "Trying previously entered password..."
-            7z x -y "-p$password" -- "$archive" "-o$output_dir" >/tmp/unzip-all-output.txt 2>&1
+            7z x -bsp1 -y "-p$password" -- "$archive" "-o$output_dir"
             set extract_status $status
             if test $extract_status -eq 0
                 echo "Previously entered password matched."
@@ -171,7 +171,7 @@ for archive in $archives
         echo "Stored passwords did not work."
         read -s -P "Enter password: " manual_password
         echo ""
-        7z x -y "-p$manual_password" -- "$archive" "-o$output_dir" >/tmp/unzip-all-output.txt 2>&1
+        7z x -bsp1 -y "-p$manual_password" -- "$archive" "-o$output_dir"
         set extract_status $status
         if test $extract_status -eq 0
             echo "Manual password worked."
@@ -193,9 +193,6 @@ for archive in $archives
         echo ""
         echo "ERROR: Failed to extract '$archive'." >&2
         echo "Archive was NOT trashed." >&2
-        if test -f /tmp/unzip-all-output.txt
-            cat /tmp/unzip-all-output.txt >&2
-        end
     end
 end
 

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Translates Chinese, Japanese & Korean (CJK) directory, zip, and image file names into English (or Romaji/Pinyin).
-Uses free online translation services with caching and local Romaji/Pinyin fallback.
+Translates CJK zip file names to English using the Gemini API.
+Fandom-aware: correctly localizes anime, game, and ACG character names.
 
 Usage:
-    ./translate-names [-r] [-n] [--romaji] [path...]
+    translate-names [-n] [-r] [path...]
 
 Options:
+    -n, --dry-run     Preview renames without changing files
     -r, --recursive   Process subdirectories recursively
-    -n, --dry-run     Show proposed renames without changing files
-    --romaji          Use phonetic Romanization instead of English translation
 """
 
 import os
@@ -17,189 +16,311 @@ import re
 import sys
 import json
 import time
-import subprocess
-import urllib.request
-import urllib.parse
 import argparse
+import urllib.request
+import urllib.error
 
-CACHE_FILE = os.path.expanduser("~/.cache/antigravity_translation_cache.json")
-_cache = {}
+GEMINI_MODEL = "gemini-flash-lite-latest"
+BATCH_SIZE = 10  # keep small for free-tier rate limits
+CACHE_FILE = os.path.expanduser("~/.cache/translate-names-cache.json")
+
+
+def get_api_key(args_key=None):
+    if args_key:
+        return args_key
+    env_key = os.environ.get("GEMINI_API_KEY")
+    if env_key:
+        return env_key.strip()
+    key_file = os.path.expanduser("~/.config/gemini-api-key")
+    if os.path.exists(key_file):
+        try:
+            with open(key_file, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+                if key:
+                    return key
+        except Exception:
+            pass
+    return None
+
 
 def load_cache():
-    global _cache
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                _cache = json.load(f)
+                return json.load(f)
         except Exception:
-            _cache = {}
+            pass
+    return {}
 
-def save_cache():
+
+def save_cache(cache):
     try:
         os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(_cache, f, ensure_ascii=False, indent=2)
+            json.dump(cache, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
 
 def contains_cjk(text):
-    return bool(re.search(r'[\uac00-\ud7a3\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]', text))
+    return bool(re.search(r'[가-힣぀-ヿ㐀-䶿一-鿿]', text))
 
-def uconv_romaji(text):
-    try:
-        proc = subprocess.run(['uconv', '-x', 'Any-Latin; Latin-ASCII'], input=text, text=True, capture_output=True, check=True)
-        out = proc.stdout.strip()
-        out = out.replace('ー', '-').replace('・', ' ')
-        return out
-    except Exception:
-        return text
 
-def translate_cjk_to_english(text):
-    if not contains_cjk(text):
-        return text
+def parse_zip_name(filename):
+    """Parse '{id}_{name}.zip' -> (id, name) or None."""
+    if not filename.lower().endswith('.zip'):
+        return None
+    stem = filename[:-4]
+    m = re.match(r'^(\d+)_(.+)$', stem)
+    if m:
+        return m.group(1), m.group(2)
+    return None
 
-    if text in _cache:
-        return _cache[text]
 
-    # Detect language: Japanese if Hiragana/Katakana present, otherwise Korean
-    lang = "ja" if any("\u3040" <= c <= "\u30ff" for c in text) else "ko"
+def translate_batch(names, api_key):
+    """Send a list of CJK name strings to Gemini and get translations back."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
+    numbered = "\n".join(f"{i+1}. {n}" for i, n in enumerate(names))
 
-    # 1. Try MyMemory API
-    try:
-        url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(text)}&langpair={lang}|en"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            result = data.get("responseData", {}).get("translatedText", "").strip()
-            if result and not contains_cjk(result) and "QUERY LENGTH LIMIT EXCEEDED" not in result:
-                _cache[text] = result
-                save_cache()
-                return result
-    except Exception:
-        pass
+    prompt = f"""You are an expert translator for ACG (Anime, Comic, Game) content.
+Translate each Chinese/Japanese/Korean filename below into English.
 
-    # 2. Try Google Translate web endpoint fallback
-    try:
-        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q={urllib.parse.quote(text)}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            result = "".join([chunk[0] for chunk in data[0] if chunk[0]]).strip()
-            if result and not contains_cjk(result):
-                _cache[text] = result
-                save_cache()
-                return result
-    except Exception:
-        pass
+RULES — follow these exactly:
+1. Use the OFFICIAL English localization for all character names, game titles, and franchises.
+   Examples you must know:
+   - 菈妮 → Ranni (Elden Ring)
+   - 甘雨 → Ganyu (Genshin Impact)
+   - 赫斯提亚 → Hestia (DanMachi)
+   - 伊蕾娜 / 伊雷娜 → Elaina (Wandering Witch)
+   - 佐仓杏子 → Kyoko Sakura (Madoka Magica)
+   - 赛尔号 → Seer (赛尔号)
+   - 脑叶公司 → Lobotomy Corporation
+   - 心灵终结 → Mental Omega (Red Alert mod)
+   - 罗德岛 → Rhodes Island (Arknights)
+   - 王者荣耀 → Honor of Kings
+   - 拉普兰德 → Lappland (Arknights)
+   - 嘉维尔 → Gavial (Arknights)
+   - 魁拔 → Kuiba
+   - 赛莉亚 → Celia (DNF)
+   - 黑木智子 → Tomoko Kuroki (WataMote)
+   - 水月 → Mizuki (Arknights)
+   - 夕 → Dusk (Arknights)
+   - 玳萝 → Darlot / Dai Luo (keep transliteration)
+   - 薇尔希 → Vyrsi / Vyrshi (keep transliteration)
+   - dnf / DNF → DNF (Dungeon & Fighter)
+   - 海伊德 → Heid / Heide (DNF)
+   - 姬小满 → Ji Xiaoman (Honor of Kings)
+   - 洛茜 → Rosie / Loxy
+   - 鸣依 → Mingyi
+   - 艾露 → Ailu / Elu
+   - 奥古斯特 → Auguste
+   - 蒂蒂 → Didi / Titi
+   - 莉瑟菲娜 → Lisephina
+   - 微笑教授 → Professor Smile
+   - 小林 → Kobayashi
+   - 茶靡 / 荼蘼 / 茶蘼 → Tumi
+   - 苏芙比 → Sotheby
+   - 赤蛮奇 → Sekibanki (Touhou)
+   - 灵王 → Spirit King
+   - 天珑 → Tianlong
+   - 铃 → Rin
+   - 日野 → Hino
+   - 艾莉什 → Elish
+   - 塞利娅 → Celia
+2. 其一/其二/其三/.../其十 → Part 1/Part 2/.../Part 10
+3. 稿件 → Commission
+4. 绘画文件 → Art Files
+5. 公开 → Public;  免费 → Free;  拆分 → Split
+6. OC / oc → OC (Original Character) — keep as "OC"
+7. Use Title Case.
+8. Keep English words, numbers, and tags like [xxx] as-is.
+9. For character names you cannot identify, transliterate naturally into English (NOT pinyin with tone marks).
+10. Do NOT add explanations. Return ONLY a JSON object.
 
-    # 3. Fallback to uconv if network unavailable
-    result = uconv_romaji(text)
-    _cache[text] = result
-    save_cache()
-    return result
+Input names:
+{numbered}
 
-def clean_translated_filename(orig, translated):
-    if not translated or translated == orig:
-        return orig
+Return a JSON object mapping each original name to its English translation, like:
+{{"original chinese name": "English Translation", ...}}"""
 
-    # Retain tags like [LUXsumildo], [mp4], etc.
-    tags = re.findall(r'\[[^\]]+\]', orig)
-    
-    # Strip any invalid OS filename characters
-    clean = re.sub(r'[\\/:*?"<>|]', '', translated)
-    clean = re.sub(r'\s+', ' ', clean).strip()
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
+    }
 
-    # Check if translation deleted main text leaving only bracket tags
-    check_stem = re.sub(r'\[[^\]]+\]', '', clean).strip()
-    if not check_stem:
-        return uconv_romaji(orig)
+    data = json.dumps(payload).encode("utf-8")
 
-    # Re-attach tags if missing from translation
-    for tag in tags:
-        if tag not in clean:
-            clean = f"{clean} {tag}"
+    # Retry logic: 503 = capacity (retry fast), 429 = rate limit (sleep long)
+    max_retries = 10
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(
+                url,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            text = result["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(text)
+        except urllib.error.HTTPError as e:
+            if attempt >= max_retries - 1:
+                raise
+            if e.code == 429:
+                wait = [30, 60, 90, 120][min(attempt, 3)]
+                print(f"   ⚠ 429 rate limited, sleeping {wait}s (attempt {attempt+1})...")
+                time.sleep(wait)
+            elif e.code in (500, 503):
+                print(f"   ⚠ {e.code} no capacity, retrying (attempt {attempt+1})...")
+                time.sleep(2)
+            else:
+                raise
+        except Exception as e:
+            if attempt >= max_retries - 1:
+                raise
+            print(f"   ⚠ {e}, retrying (attempt {attempt+1})...")
+            time.sleep(2)
 
-    clean = re.sub(r'\s+', ' ', clean).strip()
-    return clean
 
-def romanize_name(name, mode="english"):
-    if not contains_cjk(name):
-        return name
+def clean_filename(name):
+    """Sanitize translated name for the filesystem."""
+    name = name.replace('（', ' (').replace('）', ') ')
+    name = re.sub(r'[\/:*?"<>|]', '', name)
+    name = re.sub(r'\s*\(\s*', ' (', name)
+    name = re.sub(r'\s*\)\s*', ') ', name)
+    name = re.sub(r'_\s+', '_', name)
+    name = re.sub(r'\s+_', '_', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    return name
 
-    stem, ext = os.path.splitext(name)
-    if name.endswith('.av1.mp4'):
-        stem = name[:-8]
-        ext = '.av1.mp4'
-
-    if mode == "english":
-        trans = translate_cjk_to_english(stem)
-    else:
-        trans = uconv_romaji(stem)
-
-    clean_stem = clean_translated_filename(stem, trans)
-    return clean_stem + ext
-
-def process_renames(paths, recursive=False, dry_run=False, mode="english"):
-    load_cache()
-    targets = []
-    if not paths:
-        paths = ['.']
-
-    for p in paths:
-        if os.path.isfile(p) or os.path.isdir(p):
-            abs_p = os.path.abspath(p)
-            if os.path.isdir(abs_p) and recursive:
-                for root, dirs, files in os.walk(abs_p, topdown=False):
-                    # Skip .git and benchmark directories
-                    if '.git' in root or 'avif-benchmark-' in root:
-                        continue
-                    for fname in files:
-                        targets.append(os.path.join(root, fname))
-                    for dname in dirs:
-                        targets.append(os.path.join(root, dname))
-            targets.append(abs_p)
-
-    # Process deeper items first (bottom-up)
-    targets = sorted(list(set(targets)), key=lambda x: len(x.split(os.sep)), reverse=True)
-
-    renamed_count = 0
-    for target in targets:
-        dir_name, base_name = os.path.split(target)
-        if not contains_cjk(base_name):
-            continue
-
-        new_base = romanize_name(base_name, mode=mode)
-        if new_base == base_name or not new_base:
-            continue
-
-        new_path = os.path.join(dir_name, new_base)
-
-        if dry_run:
-            print(f"[DRY-RUN] '{base_name}'\n       -> '{new_base}'\n")
-            renamed_count += 1
-        else:
-            try:
-                os.rename(target, new_path)
-                print(f"Renamed: '{base_name}'\n      -> '{new_base}'\n")
-                renamed_count += 1
-            except Exception as e:
-                print(f"Error renaming '{base_name}': {e}", file=sys.stderr)
-
-    if dry_run:
-        print(f"Dry run completed. {renamed_count} item(s) would be renamed.")
-    else:
-        print(f"Successfully renamed {renamed_count} item(s).")
 
 def main():
-    parser = argparse.ArgumentParser(description="Translate Chinese/Japanese/Korean CJK folder, zip, and image names to English (or Romaji/Pinyin).")
-    parser.add_argument("paths", nargs="*", help="Files or directories to rename")
-    parser.add_argument("-r", "--recursive", action="store_true", help="Process subdirectories recursively")
-    parser.add_argument("-n", "--dry-run", action="store_true", help="Show proposed renames without changing files")
-    parser.add_argument("--romaji", action="store_true", help="Use phonetic Romanization instead of English translation")
+    parser = argparse.ArgumentParser(
+        description="Translate Chinese/Japanese/Korean CJK folder, zip, and image names to English (or Romaji/Pinyin) using Gemini AI."
+    )
+    parser.add_argument("paths", nargs="*", default=["."], help="Directories to process")
+    parser.add_argument("-n", "--dry-run", action="store_true", help="Preview without renaming")
+    parser.add_argument("-r", "--recursive", action="store_true", help="Process subdirectories")
+    parser.add_argument("--api-key", help="Gemini API key (or set GEMINI_API_KEY env var / ~/.config/gemini-api-key)")
     args = parser.parse_args()
 
-    mode = "romaji" if args.romaji else "english"
-    process_renames(args.paths, recursive=args.recursive, dry_run=args.dry_run, mode=mode)
+    api_key = get_api_key(args.api_key)
+
+    # ── Collect zip files with CJK names ──────────────────────────────────
+    targets = []  # (full_path, file_id, cjk_name)
+
+    for p in args.paths:
+        p = os.path.abspath(p)
+        if not os.path.isdir(p):
+            continue
+
+        if args.recursive:
+            for root, dirs, files in os.walk(p):
+                if '.git' in root or 'avif-benchmark-' in root:
+                    continue
+                for f in files:
+                    parsed = parse_zip_name(f)
+                    if parsed and contains_cjk(parsed[1]):
+                        targets.append((os.path.join(root, f), parsed[0], parsed[1]))
+        else:
+            for f in os.listdir(p):
+                parsed = parse_zip_name(f)
+                if parsed and contains_cjk(parsed[1]):
+                    targets.append((os.path.join(p, f), parsed[0], parsed[1]))
+
+    if not targets:
+        print("No zip files with CJK names found.")
+        return
+
+    # ── Deduplicate names and batch-translate ─────────────────────────────
+    unique_names = sorted(set(t[2] for t in targets))
+    print(f"Found {len(targets)} zip file(s) with {len(unique_names)} unique CJK name(s).\n")
+
+    cache = load_cache()
+    translations = {}
+
+    # Pull cached translations first
+    uncached = []
+    for name in unique_names:
+        if name in cache and cache[name] and not contains_cjk(cache[name]):
+            translations[name] = cache[name]
+        else:
+            uncached.append(name)
+
+    if translations:
+        print(f"📦 {len(translations)} translation(s) loaded from cache\n")
+
+    if uncached:
+        total_batches = (len(uncached) + BATCH_SIZE - 1) // BATCH_SIZE
+        for i in range(0, len(uncached), BATCH_SIZE):
+            batch = uncached[i : i + BATCH_SIZE]
+            batch_num = i // BATCH_SIZE + 1
+            print(f"⏳ Translating batch {batch_num}/{total_batches} ({len(batch)} names)...")
+            try:
+                if not api_key:
+                    print("Error: Gemini API Key not found. Pass --api-key, export GEMINI_API_KEY=..., or save to ~/.config/gemini-api-key", file=sys.stderr)
+                    sys.exit(1)
+                result = translate_batch(batch, api_key)
+                translations.update(result)
+                cache.update(result)
+                save_cache(cache)
+                print(f"   ✓ Got {len(result)} translation(s)\n")
+            except Exception as e:
+                print(f"   ✗ API error: {e}\n", file=sys.stderr)
+            if batch_num < total_batches:
+                time.sleep(10)  # respect free-tier rate limits
+
+    # ── Apply renames ─────────────────────────────────────────────────────
+    renamed = 0
+    skipped = 0
+
+    for full_path, file_id, cjk_name in sorted(targets, key=lambda t: t[1]):
+        old_basename = os.path.basename(full_path)
+        eng = translations.get(cjk_name)
+
+        if not eng or contains_cjk(eng):
+            print(f"  SKIP  {old_basename}")
+            skipped += 1
+            continue
+
+        eng = clean_filename(eng)
+
+        # Avoid duplicates when original already has the English text
+        half = len(eng) // 2
+        if half > 10:
+            first_half = eng[:half].strip().lower()
+            second_half = eng[half:].strip().lower()
+            if first_half and second_half and (first_half in second_half or second_half in first_half):
+                eng = eng[:half].strip()
+
+        new_basename = f"{file_id}_{eng}.zip"
+
+        if old_basename == new_basename:
+            continue
+
+        new_path = os.path.join(os.path.dirname(full_path), new_basename)
+
+        if args.dry_run:
+            print(f"  {old_basename}")
+            print(f"    → {new_basename}\n")
+        else:
+            try:
+                os.rename(full_path, new_path)
+                print(f"  {old_basename}")
+                print(f"    → {new_basename}\n")
+            except Exception as e:
+                print(f"  ERROR {old_basename}: {e}", file=sys.stderr)
+                skipped += 1
+                continue
+        renamed += 1
+
+    verb = "would be renamed" if args.dry_run else "renamed"
+    print(f"Done. {renamed} file(s) {verb}, {skipped} skipped.")
+
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Metric worker for benchmark-avif
-# Args: source_file avif_file result_file ssimulacra_cmd [ssimulacra_extra_args]
+# Limit ImageMagick and OpenMP thread concurrency per worker
+export MAGICK_THREAD_LIMIT=3
+export OMP_NUM_THREADS=3
+
 SRC="$1"
 AVIF="$2"
 RESULT="$3"
