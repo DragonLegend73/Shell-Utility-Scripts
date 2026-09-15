@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Translates Japanese & Korean (CJK) directory, zip, and image file names into English (or Romaji).
-Uses free online translation services with caching and local Romaji fallback.
+Translates Chinese, Japanese & Korean (CJK) directory, zip, and image file names into English (or Romaji/Pinyin).
+Uses free online translation services with caching and local Romaji/Pinyin fallback.
 
 Usage:
     ./translate-names [-r] [-n] [--romaji] [path...]

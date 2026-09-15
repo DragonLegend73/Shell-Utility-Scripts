@@ -1,6 +1,6 @@
 # Shell Utility Scripts
 
-A collection of utility scripts for media conversion, benchmarking, archiving, and file management. Most scripts are written for the Fish shell.
+A collection of utility scripts for media conversion, benchmarking, archiving, and file management. The primary scripts are written for the Fish shell (along with one Python script and a Bash helper).
 
 ## Common Flags
 
@@ -61,7 +61,7 @@ Extracts `.zip`, `.rar`, and `.7z` files, automatically testing passwords from `
 Zips each subdirectory of the current folder into its own `<dirname>.zip` file, and optionally moves the original directory to the trash.
 
 ### `translate-names`
-Translates Japanese and Korean directory, zip, and image file names into English (or Romaji) using online translation services with caching support.
+Translates Chinese, Japanese, and Korean (CJK) directory, zip, and image file names into English (or Romaji/Pinyin) using online translation services with caching support.
 - **Options**:
   - `-r, --recursive`: Process subdirectories
   - `-n, --dry-run`: Show proposed renames without changing files
