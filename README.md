@@ -1,4 +1,4 @@
-# Antigravity Scripts
+# Shell Utility Scripts
 
 A collection of utility scripts for media conversion, benchmarking, archiving, and file management. Most scripts are written for the Fish shell.
 
@@ -56,10 +56,6 @@ Extracts `.zip`, `.rar`, and `.7z` files, automatically testing passwords from `
   - `-r, --recursive`: Find archives in subfolders
   - `-f, --flatten`: Extract directly into the archive's root folder
   - `-k, --keep`: Keep archive files
-
-### `pawchive-zip`
-Groups `.webp` and `.avif` files and directories by their first two `_` delimited fields into `<key>.zip` archives, then trashes the originals. Useful for organizing downloaded image sequences.
-- **Options**: `-k, --keep`
 
 ### `zip-dirs`
 Zips each subdirectory of the current folder into its own `<dirname>.zip` file, and optionally moves the original directory to the trash.
