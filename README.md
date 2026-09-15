@@ -50,9 +50,10 @@ Calculates SSIM, PSNR, and SSIMULACRA 2 metrics, generating a detailed CSV repor
 ## Archiving & File Management
 
 ### `unzip-all`
-Extracts `.zip`, `.rar`, and `.7z` files, automatically testing passwords from `~/.config/archive-passwords.txt`. Auto-detects and decodes Shift-JIS / CP932 / CP949 encodings to prevent garbled filenames.
+Extracts `.zip`, `.rar`, and `.7z` files, automatically testing passwords from `~/.config/archive-passwords.txt` or a custom dictionary. Auto-detects and decodes Shift-JIS / CP932 / CP949 encodings to prevent garbled filenames.
 - **Options**:
   - `-e, --encoding NAME`: Encoding for ZIP filenames (default: shift-jis)
+  - `-p, --passwords FILE`: Specify a custom password dictionary file
   - `-r, --recursive`: Find archives in subfolders
   - `-f, --flatten`: Extract directly into the archive's root folder
   - `-k, --keep`: Keep archive files

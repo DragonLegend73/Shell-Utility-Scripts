@@ -7,35 +7,41 @@
 # -r/--recursive  find archives in subfolders too
 # -f/--flatten    dump contents directly into the archive's folder
 # -k/--keep       keep archive files instead of trashing them
+# -p/--passwords  specify a custom password dictionary file
 #
 # Passwords:
 #   Automatically tries passwords from:
-#     ~/.config/archive-passwords.txt
+#     ~/.config/archive-passwords.txt (or custom path via -p)
 
 set password_file ~/.config/archive-passwords.txt
 
 function show_help
-    echo "Usage: unzip-all [-e ENCODING] [-r] [-f] [-k]"
+    echo "Usage: unzip-all [-e ENCODING] [-p FILE] [-r] [-f] [-k]"
     echo ""
     echo "Extracts .zip, .rar, and .7z files."
     echo "Default: each archive gets its own folder (same dir as the archive)."
     echo ""
     echo "  -e, --encoding NAME  Encoding for ZIP filenames (default: shift-jis, fixes garbled CJK text)"
+    echo "  -p, --passwords FILE Custom password dictionary file"
     echo "  -r, --recursive      find archives in subfolders too (not just cwd)"
     echo "  -f, --flatten        dump contents directly into the archive's folder"
     echo "  -k, --keep           keep archive files instead of trashing them"
     echo "  -h, --help           show this help and exit"
     echo ""
-    echo "Password file:"
+    echo "Password file used by default:"
     echo "  $password_file"
 end
 
-argparse 'h/help' 'r/recursive' 'f/flatten' 'k/keep' 'e/encoding=' -- $argv
+argparse 'h/help' 'r/recursive' 'f/flatten' 'k/keep' 'e/encoding=' 'p/passwords=' -- $argv
 or exit 1
 
 if set -q _flag_help
     show_help
     exit 0
+end
+
+if set -q _flag_passwords
+    set password_file $_flag_passwords
 end
 
 set zip_encoding "shift-jis"
