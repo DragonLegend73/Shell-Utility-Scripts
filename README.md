@@ -2,6 +2,15 @@
 
 A collection of utility scripts for media conversion, benchmarking, archiving, and file management. Most scripts are written for the Fish shell.
 
+## Common Flags
+
+Many scripts in this collection share a standard set of flags for consistency:
+- `-r, --recursive`: Process files in subdirectories recursively.
+- `-k, --keep`: Keep original files instead of moving them to the trash (by default, many scripts replace original files).
+- `-q, --quality N`: Set the output quality level (e.g., `0-100` for AVIF compression).
+- `-s, --speed N`: Set the encoder speed/effort (e.g., `0-10`).
+- `-h, --help`: Show detailed help and usage instructions.
+
 ## Media Conversion & Compression
 
 ### `image-to-avif`
