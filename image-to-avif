@@ -150,6 +150,16 @@ for f in $files
 
     set encode_status $status
 
+    # If it fails, retry ignoring metadata (often caused by invalid Exif chunks)
+    if test $encode_status -ne 0
+        if set -q _flag_lossless
+            avifenc --ignore-exif --ignore-xmp --ignore-profile --lossless -s $speed -j $max_jobs -- "$f" "$out" >/dev/null 2>&1
+        else
+            avifenc --ignore-exif --ignore-xmp --ignore-profile -q $quality -s $speed -j $max_jobs -- "$f" "$out" >/dev/null 2>&1
+        end
+        set encode_status $status
+    end
+
     set file_end_ns (date +%s%N)
     set file_elapsed (math "($file_end_ns - $file_start_ns) / 1000000000")
 
