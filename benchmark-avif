@@ -17,7 +17,7 @@
 # Phase 2: Compute quality metrics in parallel with GNU parallel.
 
 set speed 6
-set sample_limit 10
+set sample_limit 5
 set ssimulacra_threshold 70
 set encoder_threads (math (nproc) - 2)
 test $encoder_threads -lt 1; and set encoder_threads 1
@@ -28,7 +28,7 @@ function show_help
     echo "Usage: benchmark-avif [-s N] [-n N] [-t N] [-j N] [-h]"
     echo ""
     echo "  -s, --speed N       AVIF encoder speed (default: 6)"
-    echo "  -n, --sample N      Maximum images to test (default: 10)"
+    echo "  -n, --sample N      Maximum images to test (default: 5)"
     echo "  -t, --threshold N   SSIMULACRA 2 recommendation threshold (default: 70)"
     echo "  -j, --jobs N        Parallel metric jobs (default: 3)"
     echo "  -h, --help          Show this help"
