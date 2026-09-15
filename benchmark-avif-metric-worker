@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Metric worker for benchmark-avif
+# Args: source_file avif_file result_file ssimulacra_cmd [ssimulacra_extra_args]
+SRC="$1"
+AVIF="$2"
+RESULT="$3"
+SSIM_CMD="$4"
+SSIM_EXTRA="$5"
+
+ssim_val=""
+psnr_val=""
+ssimulacra_val=""
+
+# SSIM
+raw_ssim=$(magick compare -metric SSIM "$SRC" "$AVIF" null: 2>&1)
+dssim=$(echo "$raw_ssim" | grep -oP '\([\d.eE+-]+\)' | tr -d '()')
+if [ -n "$dssim" ]; then
+    ssim_val=$(awk "BEGIN {printf \"%.8f\", 1 - $dssim}")
+fi
+
+# PSNR
+raw_psnr=$(magick compare -metric PSNR "$SRC" "$AVIF" null: 2>&1)
+psnr=$(echo "$raw_psnr" | grep -oP '^[\d.eE+-]+|^inf')
+if [ -n "$psnr" ]; then
+    if echo "$psnr" | grep -iq '^inf'; then
+        psnr_val="100"
+    else
+        psnr_val="$psnr"
+    fi
+fi
+
+# SSIMULACRA 2
+if [ -n "$SSIM_CMD" ]; then
+    metric_output=$($SSIM_CMD $SSIM_EXTRA "$SRC" "$AVIF" 2>/dev/null)
+    ssimulacra_val=$(echo "$metric_output" | grep -oP '[-+]?[\d]*\.?[\d]+([eE][-+]?[\d]+)?' | head -1)
+    if [ -n "$ssimulacra_val" ]; then
+        in_range=$(awk -v v="$ssimulacra_val" 'BEGIN { print (v >= -100 && v <= 100) ? 1 : 0 }')
+        if [ "$in_range" != "1" ]; then
+            ssimulacra_val=""
+        fi
+    fi
+fi
+
+echo "${ssim_val}|${psnr_val}|${ssimulacra_val}" > "$RESULT"

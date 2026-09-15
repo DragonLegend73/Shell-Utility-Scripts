@@ -1,0 +1,41 @@
+#!/usr/bin/env fish
+# Zips each subdirectory of the current folder into "<dirname>.zip".
+
+for cmd in zip
+    if not command -q $cmd
+        echo "Error: required command '$cmd' is not installed." >&2
+        exit 1
+    end
+end
+
+set has_gio 1
+if not command -q gio
+    echo "Warning: 'gio' command not found. Original directories will be kept." >&2
+    set has_gio 0
+end
+
+set dirs
+for d in (path filter -t dir * 2>/dev/null)
+    set d_clean (string trim -r -c / -- "$d")
+    if string match -q 'avif-benchmark-*' -- "$d_clean"
+        continue
+    end
+    set -a dirs "$d_clean"
+end
+
+if test (count $dirs) -eq 0
+    echo "No subdirectories found to zip."
+    exit 0
+end
+
+for d in $dirs
+    echo "Zipping directory: $d"
+    zip -r "$d.zip" "$d"
+    if test $status -eq 0
+        if test $has_gio -eq 1
+            gio trash -- "$d"
+        end
+    else
+        echo "Error: Failed to zip '$d'. Directory was NOT trashed." >&2
+    end
+end

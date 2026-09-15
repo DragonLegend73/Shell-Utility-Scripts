@@ -1,0 +1,196 @@
+#!/usr/bin/env fish
+# Extracts .zip, .rar, and .7z files.
+# Default: each archive gets its own folder (same dir as the archive).
+# Auto-detects and decodes Shift-JIS / CP932 / CP949 encodings to fix garbled filenames.
+#
+# -e/--encoding   specify character encoding for zip filenames (default: shift-jis)
+# -r/--recursive  find archives in subfolders too
+# -f/--flatten    dump contents directly into the archive's folder
+# -k/--keep       keep archive files instead of trashing them
+#
+# Passwords:
+#   Automatically tries passwords from:
+#     /home/dragon/.config/archive-passwords.txt
+
+set password_file "/home/dragon/.config/archive-passwords.txt"
+
+function show_help
+    echo "Usage: unzip-all [-e ENCODING] [-r] [-f] [-k]"
+    echo ""
+    echo "Extracts .zip, .rar, and .7z files."
+    echo "Default: each archive gets its own folder (same dir as the archive)."
+    echo ""
+    echo "  -e, --encoding NAME  Encoding for ZIP filenames (default: shift-jis, fixes garbled CJK text)"
+    echo "  -r, --recursive      find archives in subfolders too (not just cwd)"
+    echo "  -f, --flatten        dump contents directly into the archive's folder"
+    echo "  -k, --keep           keep archive files instead of trashing them"
+    echo "  -h, --help           show this help and exit"
+    echo ""
+    echo "Password file:"
+    echo "  $password_file"
+end
+
+argparse 'h/help' 'r/recursive' 'f/flatten' 'k/keep' 'e/encoding=' -- $argv
+or exit 1
+
+if set -q _flag_help
+    show_help
+    exit 0
+end
+
+set zip_encoding "shift-jis"
+if set -q _flag_encoding
+    set zip_encoding $_flag_encoding
+end
+
+if not command -q 7z; and not command -q unzip
+    echo "Error: neither '7z' nor 'unzip' is installed." >&2
+    exit 1
+end
+
+if not set -q _flag_keep; and not command -q gio
+    echo "Warning: 'gio' command not found. Archives will be kept." >&2
+    set _flag_keep 1
+end
+
+# -------------------------------------------------------------------
+# Load stored passwords
+# -------------------------------------------------------------------
+
+set stored_passwords
+
+if test -f "$password_file"
+    while read -l line
+        set line (string trim -- "$line")
+
+        if test -z "$line"; or string match -q '#*' -- "$line"
+            continue
+        end
+
+        set -a stored_passwords "$line"
+    end < "$password_file"
+
+    echo "Loaded "(count $stored_passwords)" stored password(s)."
+end
+
+set session_passwords
+
+# -------------------------------------------------------------------
+# Collect archives
+# -------------------------------------------------------------------
+
+set archives
+
+if set -q _flag_recursive
+    set archives (find . -name 'avif-benchmark-*' -prune -o -type f \( \
+        -iname '*.zip' -o \
+        -iname '*.rar' -o \
+        -iname '*.7z' \
+    \) -print)
+else
+    set archives (path filter -f *.zip *.ZIP *.rar *.RAR *.7z *.7Z 2>/dev/null)
+end
+
+if test (count $archives) -eq 0
+    echo "No .zip, .rar, or .7z files found."
+    exit 0
+end
+
+set archives (printf '%s\n' $archives | sort -V)
+
+# -------------------------------------------------------------------
+# Extract archives
+# -------------------------------------------------------------------
+
+for archive in $archives
+    set dir (dirname -- "$archive")
+    set base (basename -- "$archive")
+    set base (string replace -r '(?i)\.(zip|rar|7z)$' '' -- "$base")
+
+    echo ""
+    echo "Extracting: $archive"
+
+    if set -q _flag_flatten
+        set output_dir "$dir"
+    else
+        set output_dir "$dir/$base"
+        mkdir -p "$output_dir"
+    end
+
+    set extract_status 1
+
+    # Check if archive is a ZIP and unzip command supports encoding flag (-O)
+    set is_zip (string match -ri '(?i)\.zip$' -- "$archive")
+
+    # 1. Try unzip with specified encoding if it's a zip file
+    if test -n "$is_zip"; and command -q unzip
+        unzip -O "$zip_encoding" -q -o -- "$archive" -d "$output_dir" >/dev/null 2>&1
+        set extract_status $status
+    end
+
+    # 2. Try 7z without password if unzip failed or non-zip
+    if test $extract_status -ne 0; and command -q 7z
+        7z x -y -- "$archive" "-o$output_dir" >/tmp/unzip-all-output.txt 2>&1
+        set extract_status $status
+    end
+
+    # 3. Try stored passwords with 7z
+    if test $extract_status -ne 0; and command -q 7z
+        for password in $stored_passwords
+            echo "Trying stored password..."
+            7z x -y "-p$password" -- "$archive" "-o$output_dir" >/tmp/unzip-all-output.txt 2>&1
+            set extract_status $status
+            if test $extract_status -eq 0
+                echo "Stored password matched."
+                break
+            end
+        end
+    end
+
+    # 4. Try session passwords
+    if test $extract_status -ne 0; and command -q 7z
+        for password in $session_passwords
+            echo "Trying previously entered password..."
+            7z x -y "-p$password" -- "$archive" "-o$output_dir" >/tmp/unzip-all-output.txt 2>&1
+            set extract_status $status
+            if test $extract_status -eq 0
+                echo "Previously entered password matched."
+                break
+            end
+        end
+    end
+
+    # 5. Manual password entry
+    if test $extract_status -ne 0; and command -q 7z
+        echo "Stored passwords did not work."
+        read -s -P "Enter password: " manual_password
+        echo ""
+        7z x -y "-p$manual_password" -- "$archive" "-o$output_dir" >/tmp/unzip-all-output.txt 2>&1
+        set extract_status $status
+        if test $extract_status -eq 0
+            echo "Manual password worked."
+            if not contains -- "$manual_password" $session_passwords
+                set -a session_passwords "$manual_password"
+            end
+        else
+            echo "Manual password failed."
+        end
+    end
+
+    # 6. Check extraction result
+    if test $extract_status -eq 0
+        echo "Extraction successful."
+        if not set -q _flag_keep
+            gio trash -- "$archive"
+        end
+    else
+        echo ""
+        echo "ERROR: Failed to extract '$archive'." >&2
+        echo "Archive was NOT trashed." >&2
+        if test -f /tmp/unzip-all-output.txt
+            cat /tmp/unzip-all-output.txt >&2
+        end
+    end
+end
+
+rm -f /tmp/unzip-all-output.txt

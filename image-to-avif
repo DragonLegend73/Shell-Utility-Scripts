@@ -1,0 +1,222 @@
+#!/usr/bin/env fish
+# Converts all .jpg/.jpeg/.png to .avif, trashes originals.
+#
+# Default:
+#   Quality: 60
+#   Speed:   6
+#
+# Files are processed in natural filename order.
+#
+# Shows:
+#   - total conversion time
+#   - average time per image
+#   - source/output sizes
+#   - total space saved
+#   - percentage reduction
+#   - success/failure count
+#   - average and total throughput
+#
+# Use -q for quality, -s for encoder speed, -l for lossless,
+# -r for recursive processing, and -k to keep originals.
+
+function show_help
+    echo "Usage: image-to-avif [-q N] [-s N] [-l] [-r] [-k] [-h]"
+    echo ""
+    echo "Converts all .jpg/.jpeg/.png in the current folder to .avif,"
+    echo "trashing originals."
+    echo ""
+    echo "Files are processed in natural filename order."
+    echo ""
+    echo "Options:"
+    echo "  -q, --quality N       Color quality, 0-100 (default: 60)"
+    echo "  -s, --speed N         Encoder speed, 0-10 (default: 6)"
+    echo "  -l, --lossless        Use lossless AVIF encoding"
+    echo "  -r, --recursive       Also process subfolders"
+    echo "  -k, --keep            Keep original files instead of trashing them"
+    echo "  -h, --help            Show this help and exit"
+end
+
+argparse \
+    'q/quality=' \
+    's/speed=' \
+    'l/lossless' \
+    'r/recursive' \
+    'k/keep' \
+    'h/help' \
+    -- $argv
+or exit 1
+
+if set -q _flag_help
+    show_help
+    exit 0
+end
+
+set quality 60
+set speed 6
+set max_jobs (math (nproc) - 2)
+test $max_jobs -lt 1; and set max_jobs 1
+
+if set -q _flag_quality
+    set quality $_flag_quality
+end
+
+if set -q _flag_speed
+    set speed $_flag_speed
+end
+
+if set -q _flag_quality; and set -q _flag_lossless
+    echo "Error: use either -q or -l, not both."
+    exit 1
+end
+
+if not string match -rq '^[0-9]+$' -- $quality; or test $quality -lt 0; or test $quality -gt 100
+    echo "Error: quality must be between 0 and 100."
+    exit 1
+end
+
+if not string match -rq '^[0-9]+$' -- $speed; or test $speed -lt 0; or test $speed -gt 10
+    echo "Error: speed must be between 0 and 10."
+    exit 1
+end
+
+# Check required commands
+for cmd in avifenc stat sort date
+    if not command -q $cmd
+        echo "Error: required command '$cmd' is not installed." >&2
+        exit 1
+    end
+end
+
+if not set -q _flag_keep; and not command -q gio
+    echo "Warning: 'gio' command not found. Originals will be kept." >&2
+    set _flag_keep 1
+end
+
+# Find files
+if set -q _flag_recursive
+    set files (find . -name 'avif-benchmark-*' -prune -o -type f \( \
+        -iname '*.jpg' -o \
+        -iname '*.jpeg' -o \
+        -iname '*.png' \
+    \) -print)
+else
+    set files (path filter -f *.jpg *.jpeg *.png *.JPG *.JPEG *.PNG 2>/dev/null)
+end
+
+if test (count $files) -eq 0
+    echo "No .jpg/.jpeg/.png files found."
+    exit 0
+end
+
+# Natural filename sorting
+set files (printf '%s\n' $files | sort -V)
+
+set total (count $files)
+set processed 0
+set failed 0
+
+set total_source_bytes 0
+set total_output_bytes 0
+set total_encode_seconds 0
+
+# Start timer
+set start_ns (date +%s%N)
+
+echo "Converting $total image(s)..."
+if set -q _flag_lossless
+    echo "Mode:    Lossless"
+else
+    echo "Quality: $quality"
+end
+echo "Speed:   $speed"
+echo ""
+
+for f in $files
+    set processed (math $processed + 1)
+
+    set out (string replace -r '(?i)\.(jpe?g|png)$' '.avif' -- "$f")
+
+    set source_size (stat -c %s -- "$f")
+    set total_source_bytes (math $total_source_bytes + $source_size)
+
+    # Per-file timer
+    set file_start_ns (date +%s%N)
+
+    if set -q _flag_lossless
+        avifenc --lossless -s $speed -j $max_jobs -- "$f" "$out" >/dev/null 2>&1
+    else
+        avifenc -q $quality -s $speed -j $max_jobs -- "$f" "$out" >/dev/null 2>&1
+    end
+
+    set encode_status $status
+
+    set file_end_ns (date +%s%N)
+    set file_elapsed (math "($file_end_ns - $file_start_ns) / 1000000000")
+
+    set total_encode_seconds (math "$total_encode_seconds + $file_elapsed")
+
+    if test $encode_status -eq 0; and test -f "$out"
+        set output_size (stat -c %s -- "$out")
+        set total_output_bytes (math $total_output_bytes + $output_size)
+
+        if not set -q _flag_keep
+            gio trash -- "$f"
+        end
+    else
+        set failed (math $failed + 1)
+
+        echo ""
+        echo "Error: failed to encode '$f'"
+    end
+
+    set percent (math "100 * $processed / $total")
+    printf "\rProgress: [%d/%d] %.1f%%" $processed $total $percent
+end
+
+set end_ns (date +%s%N)
+set total_seconds (math "($end_ns - $start_ns) / 1000000000")
+
+set successful (math $total - $failed)
+
+echo ""
+echo ""
+echo "========================================"
+echo "RESULTS"
+echo "========================================"
+
+# Helper values
+set source_mib (math "$total_source_bytes / 1048576")
+set output_mib (math "$total_output_bytes / 1048576")
+set saved_bytes (math "$total_source_bytes - $total_output_bytes")
+set saved_mib (math "$saved_bytes / 1048576")
+
+if test $total_source_bytes -gt 0
+    set reduction (math "100 * $saved_bytes / $total_source_bytes")
+else
+    set reduction 0
+end
+
+if test $successful -gt 0
+    set avg_time (math "$total_encode_seconds / $successful")
+else
+    set avg_time 0
+end
+
+if test $total_seconds -gt 0
+    set throughput (math "$source_mib / $total_seconds")
+else
+    set throughput 0
+end
+
+echo "Successful:          $successful"
+echo "Failed:              $failed"
+echo "Source size:         "(printf "%.2f" $source_mib)" MiB"
+echo "AVIF size:           "(printf "%.2f" $output_mib)" MiB"
+echo "Space saved:         "(printf "%.2f" $saved_mib)" MiB"
+echo "Size reduction:      "(printf "%.2f" $reduction)"%"
+echo "Total time:          "(printf "%.2f" $total_seconds)" seconds"
+echo "Average/image:       "(printf "%.3f" $avg_time)" seconds"
+echo "Throughput:          "(printf "%.2f" $throughput)" MiB/s"
+echo "========================================"
+echo ""
+echo "Done."

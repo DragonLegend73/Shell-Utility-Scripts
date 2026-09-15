@@ -1,0 +1,146 @@
+#!/usr/bin/env fish
+# Converts .pdf files directly to .avif image pages.
+# Bypasses intermediate PNG files by extracting 1:1 native images directly
+# from the PDF container and encoding to AVIF.
+#
+# Default:
+#   Quality: 80
+#   Speed:   6
+#
+# Requirements: poppler (pdfimages), avifenc, stat, sort.
+
+function show_help
+    echo "Usage: pdf-to-avif [-q N] [-s N] [-r] [-k] [-h]"
+    echo ""
+    echo "Converts every .pdf into \"<name> <page>.avif\" files directly,"
+    echo "then trashes the original PDF."
+    echo ""
+    echo "Options:"
+    echo "  -q, --quality N       Color quality, 0-100 (default: 60)"
+    echo "  -s, --speed N       Encoder speed 0-10 (default: 6)"
+    echo "  -r, --recursive     Process subfolders recursively"
+    echo "  -k, --keep          Keep original PDFs instead of trashing them"
+    echo "  -h, --help          Show this help and exit"
+end
+
+argparse \
+    'q/quality=' \
+    's/speed=' \
+    'r/recursive' \
+    'k/keep' \
+    'h/help' \
+    -- $argv
+or exit 1
+
+if set -q _flag_help
+    show_help
+    exit 0
+end
+
+set quality 60
+set speed 6
+set max_jobs (math (nproc) - 2)
+test $max_jobs -lt 1; and set max_jobs 1
+
+if set -q _flag_quality
+    set quality $_flag_quality
+end
+
+if set -q _flag_speed
+    set speed $_flag_speed
+end
+
+if not string match -rq '^[0-9]+$' -- $quality; or test $quality -lt 0; or test $quality -gt 100
+    echo "Error: quality must be between 0 and 100." >&2
+    exit 1
+end
+
+if not string match -rq '^[0-9]+$' -- $speed; or test $speed -lt 0; or test $speed -gt 10
+    echo "Error: speed must be between 0 and 10." >&2
+    exit 1
+end
+
+# Check required commands
+for cmd in pdfimages avifenc stat sort date
+    if not command -q $cmd
+        echo "Error: required command '$cmd' is not installed." >&2
+        exit 1
+    end
+end
+
+if not set -q _flag_keep; and not command -q gio
+    echo "Warning: 'gio' command not found. Originals will be kept." >&2
+    set _flag_keep 1
+end
+
+# Collect PDF files
+if set -q _flag_recursive
+    set pdfs (find . -name 'avif-benchmark-*' -prune -o -type f \( -iname '*.pdf' \) -print)
+else
+    set pdfs (path filter -f *.pdf *.PDF 2>/dev/null)
+end
+
+if test (count $pdfs) -eq 0
+    echo "No .pdf files found."
+    exit 0
+end
+
+set pdfs (printf '%s\n' $pdfs | sort -V)
+set total (count $pdfs)
+set n 1
+set processed_pdfs
+
+echo "========================================"
+echo "DIRECT PDF TO AVIF CONVERTER"
+echo "========================================"
+echo "PDF files: $total"
+echo "Quality:   $quality"
+echo "Speed:     $speed"
+echo "========================================"
+echo ""
+
+set start_ns (date +%s%N)
+
+for pdf in $pdfs
+    set dir (dirname -- "$pdf")
+    set base (basename -- "$pdf")
+    set name (string replace -r '(?i)\.pdf$' '' -- "$base")
+    echo "[$n/$total] Processing: $pdf"
+
+    set tmp_dir "$dir/.tmp_pdf_avif_$n"
+    mkdir -p "$tmp_dir"
+
+    # Extract native images without re-encoding to temp dir
+    pdfimages -all -- "$pdf" "$tmp_dir/img"
+
+    set extracted (path filter -f "$tmp_dir/"* 2>/dev/null)
+
+    if test (count $extracted) -gt 0
+        set extracted (printf '%s\n' $extracted | sort -V)
+        set p 1
+        for img in $extracted
+            set target "$dir/$name $p.avif"
+            avifenc -q $quality -s $speed -j $max_jobs -- "$img" "$target" >/dev/null 2>&1
+            set p (math $p + 1)
+        end
+        set -a processed_pdfs "$pdf"
+        echo "  -> Extracted & converted $p image(s) to AVIF"
+    else
+        echo "  -> Warning: No images extracted from '$pdf'." >&2
+    end
+
+    rm -rf "$tmp_dir"
+    set n (math $n + 1)
+end
+
+if not set -q _flag_keep; and test (count $processed_pdfs) -gt 0
+    gio trash -- $processed_pdfs
+end
+
+set end_ns (date +%s%N)
+set total_seconds (math "($end_ns - $start_ns) / 1000000000")
+
+echo ""
+echo "========================================"
+echo "Total time: (printf '%.2f' $total_seconds) seconds"
+echo "Done."

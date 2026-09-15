@@ -1,0 +1,526 @@
+#!/usr/bin/env fish
+# Benchmark AVIF quality on a representative sample of the current directory tree.
+#
+# Up to 20 images are selected by source file-size quartiles.
+# Tests q50–q90 (step 5) at the chosen encoder speed (default 6).
+# Originals are never modified.
+#
+# Metrics:
+#   size, BPP, reduction, encode time, throughput
+#   SSIM, PSNR                   (ImageMagick)
+#   SSIMULACRA 2                 (ssimulacra2 / ssimulacra2_rs / as2c / fssimu2)
+#
+# Generates results.csv + graphs when matplotlib is available.
+#
+# Phase 1: Encode all sample images at all qualities (sequential, avifenc
+#           already uses multiple cores internally).
+# Phase 2: Compute quality metrics in parallel with GNU parallel.
+
+set speed 6
+set sample_limit 10
+set ssimulacra_threshold 70
+set encoder_threads (math (nproc) - 2)
+test $encoder_threads -lt 1; and set encoder_threads 1
+set metric_jobs 3
+set quality_list 30 40 50 60
+
+function show_help
+    echo "Usage: benchmark-avif [-s N] [-n N] [-t N] [-j N] [-h]"
+    echo ""
+    echo "  -s, --speed N       AVIF encoder speed (default: 6)"
+    echo "  -n, --sample N      Maximum images to test (default: 10)"
+    echo "  -t, --threshold N   SSIMULACRA 2 recommendation threshold (default: 70)"
+    echo "  -j, --jobs N        Parallel metric jobs (default: 3)"
+    echo "  -h, --help          Show this help"
+end
+
+argparse 's/speed=' 'n/sample=' 't/threshold=' 'j/jobs=' 'h/help' -- $argv
+or exit 1
+
+if set -q _flag_help
+    show_help
+    exit 0
+end
+
+set -q _flag_speed; and set speed $_flag_speed
+set -q _flag_sample; and set sample_limit $_flag_sample
+set -q _flag_threshold; and set ssimulacra_threshold $_flag_threshold
+set -q _flag_jobs; and set metric_jobs $_flag_jobs
+
+# -------------------------------------------------------------------
+# Validate arguments
+# -------------------------------------------------------------------
+if not string match -rq '^[0-9]+$' -- $speed; or test $speed -lt 0; or test $speed -gt 10
+    echo "Error: speed must be an integer from 0 to 10."
+    exit 1
+end
+if not string match -rq '^[0-9]+$' -- $sample_limit; or test $sample_limit -lt 1
+    echo "Error: sample size must be a positive integer."
+    exit 1
+end
+if not string match -rq '^[0-9]+([.][0-9]+)?$' -- $ssimulacra_threshold
+    echo "Error: SSIMULACRA 2 threshold must be numeric."
+    exit 1
+end
+if not string match -rq '^[0-9]+$' -- $metric_jobs; or test $metric_jobs -lt 1
+    echo "Error: jobs must be a positive integer."
+    exit 1
+end
+
+# -------------------------------------------------------------------
+# Check tools
+# -------------------------------------------------------------------
+for cmd in avifenc magick stat sort awk column parallel
+    if not command -q $cmd
+        echo "Error: required command '$cmd' was not found."
+        exit 1
+    end
+end
+
+set has_ssimulacra 0
+set ssimulacra_cmd ""
+set ssimulacra_extra_args
+
+for cmd in ssimulacra2 ssimulacra2_rs as2c fssimu2
+    if command -q $cmd
+        set has_ssimulacra 1
+        set ssimulacra_cmd $cmd
+        if test "$cmd" = "ssimulacra2_rs"
+            set ssimulacra_extra_args "image"
+        end
+        break
+    end
+end
+
+set has_python 0
+if command -q python3
+    if python3 -c 'import matplotlib' >/dev/null 2>&1
+        set has_python 1
+    end
+end
+
+echo "Available metrics/tools:"
+echo "  SSIM / PSNR                   : ImageMagick"
+if test $has_ssimulacra -eq 1
+    echo "  SSIMULACRA 2                  : available ($ssimulacra_cmd)"
+else
+    echo "  SSIMULACRA 2                  : not found (skipped)"
+end
+if test $has_python -eq 1
+    echo "  Graph generation              : available"
+else
+    echo "  Graph generation              : skipped (python3 + matplotlib required)"
+end
+echo ""
+
+# -------------------------------------------------------------------
+# Find source images (ignore previous benchmark output folders)
+# -------------------------------------------------------------------
+set all_files (find . -name 'avif-benchmark-*' -prune -o -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) -print)
+if test (count $all_files) -eq 0
+    echo "No .jpg/.jpeg/.png files found."
+    exit 0
+end
+
+set all_files (printf '%s\n' $all_files | sort -V)
+set total_files (count $all_files)
+
+# -------------------------------------------------------------------
+# Select sample by size quartiles
+# -------------------------------------------------------------------
+set sample_count $sample_limit
+if test $sample_count -gt $total_files
+    set sample_count $total_files
+end
+
+set size_table (mktemp)
+for f in $all_files
+    set size (stat -c %s -- "$f")
+    printf '%s\t%s\n' "$size" "$f"
+end | sort -n -k1,1 > "$size_table"
+
+set sample_table (mktemp)
+
+if test $sample_count -ge 4
+    set base_per_quartile (math "floor($sample_count / 4)")
+    set remainder (math "$sample_count % 4")
+
+    for quartile in 1 2 3 4
+        set extra 0
+        if test $quartile -le $remainder
+            set extra 1
+        end
+        set take (math "$base_per_quartile + $extra")
+        set qstart (math "floor(($quartile - 1) * $total_files / 4) + 1")
+        set qend (math "floor($quartile * $total_files / 4)")
+        set qcount (math "$qend - $qstart + 1")
+
+        if test $take -eq 1
+            sed -n "$qstart""p" "$size_table" >> "$sample_table"
+        else
+            for i in (seq 1 $take)
+                set numerator (math "$i - 1")
+                set denominator (math "$take - 1")
+                set offset (math "round($numerator * ($qcount - 1) / $denominator)")
+                set idx (math "$qstart + $offset")
+                sed -n "$idx""p" "$size_table" >> "$sample_table"
+            end
+        end
+    end
+else
+    for i in (seq 1 $sample_count)
+        set numerator (math "$i - 1")
+        set denominator (math "max(1, $sample_count - 1)")
+        set offset (math "round($numerator * ($total_files - 1) / $denominator)")
+        set index (math "$offset + 1")
+        sed -n "$index""p" "$size_table" >> "$sample_table"
+    end
+end
+
+set files (awk -F '\t' '!seen[$2]++ {print $2}' "$sample_table" | sort -V)
+set sample_count (count $files)
+rm -f "$size_table" "$sample_table"
+
+# -------------------------------------------------------------------
+# Output directory
+# -------------------------------------------------------------------
+set timestamp (date '+%Y%m%d-%H%M%S')
+set outdir "$PWD/avif-benchmark-$timestamp"
+set tmpdir "$outdir/.tmp"
+mkdir -p "$outdir" "$tmpdir"
+set csv "$outdir/results.csv"
+
+printf '%s\n' \
+"quality,sample_count,source_mib,avif_mib,reduction_percent,bpp,total_encode_seconds,avg_encode_seconds,throughput_mib_s,avg_ssim,avg_psnr,avg_ssimulacra2" \
+> "$csv"
+
+echo "========================================"
+echo "AVIF QUALITY BENCHMARK"
+echo "========================================"
+echo "Source images:  $total_files (recursive)"
+echo "Sample size:    $sample_count"
+echo "Qualities:      $quality_list"
+echo "Encoder speed:  $speed"
+echo "Encoder threads: $encoder_threads"
+echo "Metric jobs:    $metric_jobs (parallel)"
+echo "Output:         $outdir"
+echo "========================================"
+echo ""
+echo "Selected images:"
+for f in $files
+    echo "  $f"
+end
+echo ""
+
+# -------------------------------------------------------------------
+# Phase 1: Sequential encoding at all quality levels
+# -------------------------------------------------------------------
+echo "════════════════════════════════════════"
+echo "PHASE 1: Encoding"
+echo "════════════════════════════════════════"
+
+# Track encode times per quality level
+set total_combos (math (count $quality_list) " * $sample_count")
+set combo_num 0
+
+for quality in $quality_list
+    set quality_dir "$outdir/q$quality"
+    mkdir -p "$quality_dir"
+
+    set image_number 0
+    set encode_times_file "$tmpdir/encode_times_q$quality"
+    printf '' > "$encode_times_file"
+
+    for f in $files
+        set image_number (math "$image_number + 1")
+        set combo_num (math "$combo_num + 1")
+
+        set filename (basename "$f")
+        set stem (string replace -r '(?i)\.(jpe?g|png)$' '' -- "$filename")
+        set output "$quality_dir/"(printf "%03d_%s.avif" $image_number "$stem")
+
+        set file_start_ns (date +%s%N)
+        avifenc -q $quality -s $speed -j $encoder_threads "$f" "$output" >/dev/null 2>&1
+        set encode_status $status
+        set file_end_ns (date +%s%N)
+        set elapsed (math "($file_end_ns - $file_start_ns) / 1000000000")
+
+        if test $encode_status -ne 0; or not test -f "$output"
+            printf "\r  [%d/%d] FAILED: q%s %s\n" $combo_num $total_combos "$quality" "$filename"
+            echo "FAIL $elapsed" >> "$encode_times_file"
+        else
+            echo "$elapsed" >> "$encode_times_file"
+        end
+
+        printf "\r  Encoding: [%d/%d] q%s" $combo_num $total_combos "$quality"
+    end
+end
+echo ""
+echo "  Encoding complete."
+echo ""
+
+# -------------------------------------------------------------------
+# Phase 2: Parallel metric computation
+# -------------------------------------------------------------------
+echo "════════════════════════════════════════"
+echo "PHASE 2: Quality metrics (parallel)"
+echo "════════════════════════════════════════"
+
+# Metric worker script (installed alongside benchmark-avif)
+set metric_script (command -s benchmark-avif-metric-worker)
+if not test -x "$metric_script"
+    echo "Error: benchmark-avif-metric-worker not found in PATH."
+    exit 1
+end
+
+# Build job list for GNU parallel
+set job_list "$tmpdir/metric_jobs.txt"
+printf '' > "$job_list"
+
+set total_metric_jobs 0
+for quality in $quality_list
+    set quality_dir "$outdir/q$quality"
+    set image_number 0
+
+    for f in $files
+        set image_number (math "$image_number + 1")
+
+        set filename (basename "$f")
+        set stem (string replace -r '(?i)\.(jpe?g|png)$' '' -- "$filename")
+        set output "$quality_dir/"(printf "%03d_%s.avif" $image_number "$stem")
+
+        if test -f "$output"
+            set result_file "$tmpdir/metric_q"$quality"_"$image_number".txt"
+            set ssim_cmd_arg ""
+            set ssim_extra_arg ""
+            if test $has_ssimulacra -eq 1
+                set ssim_cmd_arg "$ssimulacra_cmd"
+                set ssim_extra_arg "$ssimulacra_extra_args"
+            end
+            printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$output" "$result_file" "$ssim_cmd_arg" "$ssim_extra_arg" >> "$job_list"
+            set total_metric_jobs (math "$total_metric_jobs + 1")
+        end
+    end
+end
+
+echo "  Running $total_metric_jobs metric jobs across $metric_jobs workers..."
+
+# Run all metric jobs in parallel
+parallel --colsep '\t' -j $metric_jobs --bar \
+    bash "$metric_script" {1} {2} {3} {4} {5} \
+    < "$job_list"
+
+echo "  Metrics complete."
+echo ""
+
+# -------------------------------------------------------------------
+# Gather results per quality level
+# -------------------------------------------------------------------
+for quality in $quality_list
+    set quality_dir "$outdir/q$quality"
+    set encode_times_file "$tmpdir/encode_times_q$quality"
+
+    set total_source_bytes 0
+    set total_output_bytes 0
+    set total_pixels 0
+    set total_encode_seconds 0
+
+    set total_ssim 0
+    set total_psnr 0
+    set total_ssimulacra 0
+
+    set count_ssim 0
+    set count_psnr 0
+    set count_ssimulacra 0
+
+    set image_number 0
+
+    # Read encode times
+    set encode_lines (cat "$encode_times_file")
+
+    for f in $files
+        set image_number (math "$image_number + 1")
+
+        set filename (basename "$f")
+        set stem (string replace -r '(?i)\.(jpe?g|png)$' '' -- "$filename")
+        set output "$quality_dir/"(printf "%03d_%s.avif" $image_number "$stem")
+
+        set source_size (stat -c %s -- "$f")
+        set dimensions (magick identify -format '%wx%h\n' -- "$f" 2>/dev/null | head -1)
+        set width (string split 'x' -- "$dimensions")[1]
+        set height (string split 'x' -- "$dimensions")[2]
+
+        if string match -rq '^[0-9]+$' -- "$width"; and string match -rq '^[0-9]+$' -- "$height"
+            set total_pixels (math "$total_pixels + ($width * $height)")
+        end
+        set total_source_bytes (math "$total_source_bytes + $source_size")
+
+        # Encode time
+        set etime "$encode_lines[$image_number]"
+        if not string match -q 'FAIL*' -- "$etime"
+            set total_encode_seconds (math "$total_encode_seconds + $etime")
+        end
+
+        if not test -f "$output"
+            continue
+        end
+
+        set output_size (stat -c %s -- "$output")
+        set total_output_bytes (math "$total_output_bytes + $output_size")
+
+        # Read metric results
+        set result_file "$tmpdir/metric_q"$quality"_"$image_number".txt"
+        if test -f "$result_file"
+            set metric_line (cat "$result_file")
+            set metric_parts (string split '|' -- "$metric_line")
+
+            # SSIM
+            if test -n "$metric_parts[1]"
+                set total_ssim (math "$total_ssim + $metric_parts[1]")
+                set count_ssim (math "$count_ssim + 1")
+            end
+
+            # PSNR
+            if test -n "$metric_parts[2]"
+                set total_psnr (math "$total_psnr + $metric_parts[2]")
+                set count_psnr (math "$count_psnr + 1")
+            end
+
+            # SSIMULACRA 2
+            if test (count $metric_parts) -ge 3; and test -n "$metric_parts[3]"
+                set total_ssimulacra (math "$total_ssimulacra + $metric_parts[3]")
+                set count_ssimulacra (math "$count_ssimulacra + 1")
+            end
+        end
+    end
+
+    # Averages
+    set avg_ssim ""
+    set avg_psnr ""
+    set avg_ssimulacra ""
+
+    test $count_ssim -gt 0; and set avg_ssim (math "$total_ssim / $count_ssim")
+    test $count_psnr -gt 0; and set avg_psnr (math "$total_psnr / $count_psnr")
+    test $count_ssimulacra -gt 0; and set avg_ssimulacra (math "$total_ssimulacra / $count_ssimulacra")
+
+    set source_mib (math "$total_source_bytes / 1048576")
+    set output_mib (math "$total_output_bytes / 1048576")
+
+    set reduction 0
+    test $total_source_bytes -gt 0; and set reduction (math "100 * (1 - $total_output_bytes / $total_source_bytes)")
+
+    set bpp ""
+    test $total_pixels -gt 0; and set bpp (math "($total_output_bytes * 8) / $total_pixels")
+
+    set avg_encode 0
+    test $sample_count -gt 0; and set avg_encode (math "$total_encode_seconds / $sample_count")
+
+    set throughput 0
+    test $total_encode_seconds -gt 0; and set throughput (math "$source_mib / $total_encode_seconds")
+
+    # CSV row
+    printf "%s,%d,%.6f,%.6f,%.6f,%s,%.6f,%.6f,%.6f,%s,%s,%s\n" \
+        "$quality" "$sample_count" "$source_mib" "$output_mib" "$reduction" \
+        "$bpp" "$total_encode_seconds" "$avg_encode" "$throughput" \
+        "$avg_ssim" "$avg_psnr" "$avg_ssimulacra" \
+        >> "$csv"
+
+    # Human summary
+    echo "────────────────────────────────────────"
+    echo "q$quality"
+    echo "────────────────────────────────────────"
+    echo "  AVIF size:          "(printf "%.2f" $output_mib)" MiB"
+    echo "  Reduction:          "(printf "%.2f" $reduction)" %"
+    test -n "$bpp"; and echo "  BPP:                "(printf "%.4f" $bpp)
+    echo "  Total encode:       "(printf "%.2f" $total_encode_seconds)" s"
+    echo "  Avg/image:          "(printf "%.3f" $avg_encode)" s"
+    echo "  Throughput:         "(printf "%.2f" $throughput)" MiB/s"
+    test -n "$avg_ssimulacra"; and echo "  SSIMULACRA 2:       "(printf "%.3f" $avg_ssimulacra)
+    test -n "$avg_ssim";       and echo "  SSIM:               "(printf "%.6f" $avg_ssim)
+    test -n "$avg_psnr";       and echo "  PSNR:               "(printf "%.3f" $avg_psnr)" dB"
+end
+
+# -------------------------------------------------------------------
+# Final summary
+# -------------------------------------------------------------------
+echo ""
+echo "========================================"
+echo "BENCHMARK SUMMARY"
+echo "========================================"
+echo ""
+column -t -s ',' "$csv"
+echo ""
+
+if test $has_ssimulacra -eq 1
+    set recommended (awk -F ',' -v threshold="$ssimulacra_threshold" '
+        NR > 1 && $12 != "" && ($12 + 0) >= threshold {
+            print $1 "," $12
+            exit
+        }
+    ' "$csv")
+
+    if test -n "$recommended"
+        set rec_fields (string split ',' -- "$recommended")
+        echo "Recommended starting quality:"
+        echo "  q$rec_fields[1] / speed $speed"
+        echo "  Average SSIMULACRA 2: $rec_fields[2]"
+        echo "  Threshold:            $ssimulacra_threshold"
+        echo ""
+        echo "This is the lowest tested quality that met the threshold on the sample."
+    else
+        echo "No tested quality reached the SSIMULACRA 2 threshold of $ssimulacra_threshold."
+        echo "Inspect q80–q90 manually or lower the threshold with -t."
+    end
+else
+    echo "SSIMULACRA 2 is not installed → no automatic recommendation."
+end
+echo ""
+
+# -------------------------------------------------------------------
+# Graphs
+# -------------------------------------------------------------------
+if test $has_python -eq 1
+    set plot_script (mktemp)
+    begin
+        printf '%s\n' \
+'import csv, math, sys, pathlib' \
+'import matplotlib.pyplot as plt' \
+'csv_path = pathlib.Path(sys.argv[1])' \
+'out = csv_path.parent' \
+'rows = list(csv.DictReader(csv_path.open()))' \
+'q = [int(r["quality"]) for r in rows]' \
+'def series(key):' \
+'    return [float(r[key]) if r.get(key) else float("nan") for r in rows]' \
+'def save(x, y, xlabel, ylabel, title, name):' \
+'    plt.figure(figsize=(8,5))' \
+'    plt.plot(x, y, marker="o")' \
+'    plt.xlabel(xlabel)' \
+'    plt.ylabel(ylabel)' \
+'    plt.title(title)' \
+'    plt.grid(True, alpha=0.25)' \
+'    plt.tight_layout()' \
+'    plt.savefig(out / name, dpi=160)' \
+'    plt.close()' \
+'ssim2 = series("avg_ssimulacra2")' \
+'if any(not math.isnan(v) for v in ssim2):' \
+'    save(q, ssim2, "AVIF quality", "Average SSIMULACRA 2", "AVIF quality vs SSIMULACRA 2", "quality_vs_ssimulacra2.png")' \
+'    save(series("avif_mib"), ssim2, "AVIF size (MiB)", "Average SSIMULACRA 2", "SSIMULACRA 2 vs AVIF size", "ssimulacra2_vs_size.png")' \
+'save(q, series("avif_mib"), "AVIF quality", "AVIF size (MiB)", "AVIF quality vs file size", "quality_vs_size.png")' \
+'save(q, series("total_encode_seconds"), "AVIF quality", "Total encode time (s)", "AVIF quality vs encode time", "quality_vs_encode_time.png")'
+    end > "$plot_script"
+
+    python3 "$plot_script" "$csv"
+    set plot_status $status
+    rm -f "$plot_script"
+
+    if test $plot_status -eq 0
+        echo "Graphs generated in: $outdir"
+    else
+        echo "Graph generation failed."
+    end
+end
+
+rm -rf "$tmpdir"
+echo ""
+echo "CSV: $csv"
+echo "Done."

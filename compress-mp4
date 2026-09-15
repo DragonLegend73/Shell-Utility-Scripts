@@ -1,0 +1,230 @@
+#!/usr/bin/env fish
+# Compresses MP4/video files to AV1 (libsvtav1 + libopus) for optimal archival storage.
+#
+# Default:
+#   Video Codec: SVT-AV1
+#   CRF:         28 (Visually transparent high-compression archival)
+#   Preset:      6  (Optimal balance of encoding speed & compression efficiency)
+#   Audio Codec: Opus (128 kbps stereo)
+#
+# Shows:
+#   - total conversion time
+#   - source/output sizes
+#   - total space saved & percentage reduction
+#   - success/failure counts
+#
+# Usage:
+#   compress-mp4 [options] [files/directories...]
+
+function show_help
+    echo "Usage: compress-mp4 [-c N] [-p N] [-r] [-k] [-h] [FILE/DIR...]"
+    echo ""
+    echo "Compresses .mp4/.mkv/.mov/.avi videos to AV1 format (.av1.mp4) using SVT-AV1,"
+    echo "trashing original files after successful compression."
+    echo ""
+    echo "Options:"
+    echo "  -c, --crf N        Constant Rate Factor, 0-63 (default: 28, lower = higher quality)"
+    echo "  -p, --preset N     SVT-AV1 encoder preset, 0-13 (default: 6, lower = slower/smaller)"
+    echo "  -r, --recursive    Process subfolders recursively"
+    echo "  -k, --keep         Keep original files instead of trashing them"
+    echo "  -h, --help         Show this help and exit"
+end
+
+argparse \
+    'c/crf=' \
+    'p/preset=' \
+    'r/recursive' \
+    'k/keep' \
+    'h/help' \
+    -- $argv
+or exit 1
+
+if set -q _flag_help
+    show_help
+    exit 0
+end
+
+set crf 28
+set preset 6
+
+if set -q _flag_crf
+    set crf $_flag_crf
+end
+
+if set -q _flag_preset
+    set preset $_flag_preset
+end
+
+if not string match -rq '^[0-9]+$' -- $crf; or test $crf -lt 0; or test $crf -gt 63
+    echo "Error: CRF must be an integer between 0 and 63." >&2
+    exit 1
+end
+
+if not string match -rq '^[0-9]+$' -- $preset; or test $preset -lt 0; or test $preset -gt 13
+    echo "Error: preset must be an integer between 0 and 13." >&2
+    exit 1
+end
+
+# Dependency checks
+for cmd in ffmpeg ffprobe stat sort date
+    if not command -q $cmd
+        echo "Error: required command '$cmd' is not installed." >&2
+        exit 1
+    end
+end
+
+if not set -q _flag_keep; and not command -q gio
+    echo "Warning: 'gio' command not found. Original files will be kept." >&2
+    set _flag_keep 1
+end
+
+# Check for libsvtav1 encoder support
+if not ffmpeg -encoders 2>/dev/null | string match -q '*libsvtav1*'
+    echo "Error: ffmpeg build does not support 'libsvtav1' encoder." >&2
+    exit 1
+end
+
+# Collect video files
+set targets $argv
+
+if test (count $targets) -gt 0
+    set videos
+    for t in $targets
+        if test -f "$t"
+            set -a videos "$t"
+        else if test -d "$t"
+            set sub_v (find "$t" -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.avi' \) -print)
+            set -a videos $sub_v
+        end
+    end
+else if set -q _flag_recursive
+    set videos (find . -name 'avif-benchmark-*' -prune -o -type f \( \
+        -iname '*.mp4' -o \
+        -iname '*.mkv' -o \
+        -iname '*.mov' -o \
+        -iname '*.avi' \
+    \) -print)
+else
+    set videos (path filter -f *.mp4 *.MP4 *.mkv *.MKV *.mov *.MOV *.avi *.AVI 2>/dev/null)
+end
+
+# Filter out already encoded .av1.mp4 outputs
+set input_videos
+for v in $videos
+    if string match -q '*.av1.mp4' -- "$v"
+        continue
+    end
+    set -a input_videos "$v"
+end
+
+if test (count $input_videos) -eq 0
+    echo "No video files found to compress."
+    exit 0
+end
+
+set input_videos (printf '%s\n' $input_videos | sort -V)
+set total (count $input_videos)
+set processed 0
+set failed 0
+
+set total_source_bytes 0
+set total_output_bytes 0
+
+set start_ns (date +%s%N)
+
+echo "========================================"
+echo "AV1 VIDEO ARCHIVAL COMPRESSOR"
+echo "========================================"
+echo "Files:     $total video(s)"
+echo "Codec:     AV1 (libsvtav1)"
+echo "CRF:       $crf"
+echo "Preset:    $preset"
+echo "Audio:     Opus (128k)"
+echo "========================================"
+echo ""
+
+for v in $input_videos
+    set processed (math $processed + 1)
+    set dir (dirname -- "$v")
+    set base (basename -- "$v")
+    set stem (string replace -r '(?i)\.(mp4|mkv|mov|avi)$' '' -- "$base")
+    set out "$dir/$stem.av1.mp4"
+
+    set source_size (stat -c %s -- "$v")
+    set total_source_bytes (math $total_source_bytes + $source_size)
+
+    echo "[$processed/$total] Encoding: $v"
+
+    # Audio stream check
+    set has_audio (ffprobe -v error -select_streams a -show_entries stream=codec_type -of default=nw=1:nk=1 -- "$v" 2>/dev/null)
+
+    if test -n "$has_audio"
+        ffmpeg -y -hide_banner -loglevel error -stats \
+            -i "$v" \
+            -c:v libsvtav1 -preset $preset -crf $crf \
+            -c:a libopus -b:a 128k \
+            -- "$out"
+    else
+        ffmpeg -y -hide_banner -loglevel error -stats \
+            -i "$v" \
+            -c:v libsvtav1 -preset $preset -crf $crf \
+            -an \
+            -- "$out"
+    end
+
+    set encode_status $status
+
+    if test $encode_status -eq 0; and test -f "$out"
+        set output_size (stat -c %s -- "$out")
+        set total_output_bytes (math $total_output_bytes + $output_size)
+        set reduction_file (math "100 * (1 - $output_size / $source_size)")
+
+        set src_mb (math "$source_size / 1048576")
+        set out_mb (math "$output_size / 1048576")
+        printf "  -> Done: %.1f MiB -> %.1f MiB (%.1f%% space saved)\n\n" $src_mb $out_mb $reduction_file
+
+        if not set -q _flag_keep
+            gio trash -- "$v"
+        end
+    else
+        set failed (math $failed + 1)
+        echo "  -> ERROR: Failed to compress '$v'" >&2
+        rm -f "$out"
+    end
+end
+
+set end_ns (date +%s%N)
+set total_seconds (math "($end_ns - $start_ns) / 1000000000")
+set successful (math $total - $failed)
+
+echo "========================================"
+echo "COMPRESSION SUMMARY"
+echo "========================================"
+
+set source_mib (math "$total_source_bytes / 1048576")
+set output_mib (math "$total_output_bytes / 1048576")
+set saved_bytes (math "$total_source_bytes - $total_output_bytes")
+set saved_mib (math "$saved_bytes / 1048576")
+
+if test $total_source_bytes -gt 0
+    set reduction (math "100 * $saved_bytes / $total_source_bytes")
+else
+    set reduction 0
+end
+
+if test $total_seconds -gt 0
+    set throughput (math "$source_mib / $total_seconds")
+else
+    set throughput 0
+end
+
+echo "Successful:          $successful"
+echo "Failed:              $failed"
+echo "Original size:       "(printf "%.2f" $source_mib)" MiB"
+echo "AV1 size:            "(printf "%.2f" $output_mib)" MiB"
+echo "Space saved:         "(printf "%.2f" $saved_mib)" MiB"
+echo "Size reduction:      "(printf "%.2f" $reduction)"%"
+echo "Total time:          "(printf "%.2f" $total_seconds)" seconds"
+echo "Throughput:          "(printf "%.2f" $throughput)" MiB/s"
+echo "========================================"
+echo "Done."
