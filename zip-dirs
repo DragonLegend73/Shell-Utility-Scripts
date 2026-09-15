@@ -2,14 +2,15 @@
 # Zips each subdirectory of the current folder into "<dirname>.zip".
 
 function show_help
-    echo "Usage: zip-dirs [-h]"
+    echo "Usage: zip-dirs [-k] [-h]"
     echo ""
     echo "Zips each subdirectory of the current folder into its own <dirname>.zip file."
     echo ""
+    echo "  -k, --keep    keep original directories instead of trashing them"
     echo "  -h, --help    show this help and exit"
 end
 
-argparse 'h/help' -- $argv
+argparse 'h/help' 'k/keep' -- $argv
 or exit 1
 
 if set -q _flag_help
@@ -48,7 +49,7 @@ for d in $dirs
     echo "Zipping directory: $d"
     zip -r "$d.zip" "$d"
     if test $status -eq 0
-        if test $has_gio -eq 1
+        if test $has_gio -eq 1; and not set -q _flag_keep
             gio trash -- "$d"
         end
     else

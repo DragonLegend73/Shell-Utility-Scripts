@@ -59,6 +59,7 @@ Extracts `.zip`, `.rar`, and `.7z` files, automatically testing passwords from `
 
 ### `zip-dirs`
 Zips each subdirectory of the current folder into its own `<dirname>.zip` file, and optionally moves the original directory to the trash.
+- **Options**: `-k, --keep`
 
 ### `translate-names`
 Translates Chinese, Japanese, and Korean (CJK) directory, zip, and image file names into English (or Romaji/Pinyin) using online translation services with caching support.
