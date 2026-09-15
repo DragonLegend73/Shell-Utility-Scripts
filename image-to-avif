@@ -94,7 +94,7 @@ end
 
 # Find files
 if set -q _flag_recursive
-    set files (find . -name 'avif-benchmark-*' -prune -o -type f \( \
+    set files (find . -name '.git' -prune -o -name 'avif-benchmark-*' -prune -o -type f \( \
         -iname '*.jpg' -o \
         -iname '*.jpeg' -o \
         -iname '*.png' \

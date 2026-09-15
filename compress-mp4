@@ -98,7 +98,7 @@ if test (count $targets) -gt 0
         end
     end
 else if set -q _flag_recursive
-    set videos (find . -name 'avif-benchmark-*' -prune -o -type f \( \
+    set videos (find . -name '.git' -prune -o -name 'avif-benchmark-*' -prune -o -type f \( \
         -iname '*.mp4' -o \
         -iname '*.mkv' -o \
         -iname '*.mov' -o \

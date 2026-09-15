@@ -10,9 +10,9 @@
 #
 # Passwords:
 #   Automatically tries passwords from:
-#     /home/dragon/.config/archive-passwords.txt
+#     ~/.config/archive-passwords.txt
 
-set password_file "/home/dragon/.config/archive-passwords.txt"
+set password_file ~/.config/archive-passwords.txt
 
 function show_help
     echo "Usage: unzip-all [-e ENCODING] [-r] [-f] [-k]"
@@ -82,7 +82,7 @@ set session_passwords
 set archives
 
 if set -q _flag_recursive
-    set archives (find . -name 'avif-benchmark-*' -prune -o -type f \( \
+    set archives (find . -name '.git' -prune -o -name 'avif-benchmark-*' -prune -o -type f \( \
         -iname '*.zip' -o \
         -iname '*.rar' -o \
         -iname '*.7z' \

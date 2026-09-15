@@ -150,6 +150,9 @@ def process_renames(paths, recursive=False, dry_run=False, mode="english"):
             abs_p = os.path.abspath(p)
             if os.path.isdir(abs_p) and recursive:
                 for root, dirs, files in os.walk(abs_p, topdown=False):
+                    # Skip .git and benchmark directories
+                    if '.git' in root or 'avif-benchmark-' in root:
+                        continue
                     for fname in files:
                         targets.append(os.path.join(root, fname))
                     for dname in dirs:
@@ -188,7 +191,7 @@ def process_renames(paths, recursive=False, dry_run=False, mode="english"):
         print(f"Successfully renamed {renamed_count} item(s).")
 
 def main():
-    parser = argparse.ArgumentParser(description="Translate Japanese/Korean CJK folder, zip, and image names to English.")
+    parser = argparse.ArgumentParser(description="Translate Chinese/Japanese/Korean CJK folder, zip, and image names to English (or Romaji/Pinyin).")
     parser.add_argument("paths", nargs="*", help="Files or directories to rename")
     parser.add_argument("-r", "--recursive", action="store_true", help="Process subdirectories recursively")
     parser.add_argument("-n", "--dry-run", action="store_true", help="Show proposed renames without changing files")

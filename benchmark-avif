@@ -116,7 +116,7 @@ echo ""
 # -------------------------------------------------------------------
 # Find source images (ignore previous benchmark output folders)
 # -------------------------------------------------------------------
-set all_files (find . -name 'avif-benchmark-*' -prune -o -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) -print)
+set all_files (find . -name '.git' -prune -o -name 'avif-benchmark-*' -prune -o -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) -print)
 if test (count $all_files) -eq 0
     echo "No .jpg/.jpeg/.png files found."
     exit 0

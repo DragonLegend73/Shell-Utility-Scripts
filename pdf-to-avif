@@ -75,7 +75,7 @@ end
 
 # Collect PDF files
 if set -q _flag_recursive
-    set pdfs (find . -name 'avif-benchmark-*' -prune -o -type f \( -iname '*.pdf' \) -print)
+    set pdfs (find . -name '.git' -prune -o -name 'avif-benchmark-*' -prune -o -type f \( -iname '*.pdf' \) -print)
 else
     set pdfs (path filter -f *.pdf *.PDF 2>/dev/null)
 end
