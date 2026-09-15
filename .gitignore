@@ -1,2 +1,5 @@
 .tmp_*
 pawchive-zip
+sugar_extract.py
+sugar_clean.py
+__pycache__/

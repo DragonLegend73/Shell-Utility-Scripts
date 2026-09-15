@@ -63,7 +63,9 @@ Zips each subdirectory of the current folder into its own `<dirname>.zip` file, 
 - **Options**: `-k, --keep`
 
 ### `translate-names`
-Translates Chinese, Japanese, and Korean (CJK) directory, zip, and image file names into English using Gemini AI with local caching (`~/.cache/translate-names-cache.json`).
+Translates Chinese, Japanese, and Korean (CJK) `.zip` file names into English using Gemini AI with local caching (`~/.cache/translate-names-cache.json`).
+- **File Format**: Expects files matching the pattern `{id}_{CJK_name}.zip` (e.g., `12345678_日本語タイトル.zip` $\rightarrow$ `12345678_English Title.zip`), preserving the ID prefix. Automatically handles whitespace around filenames.
+- **Safety & Fallbacks**: Configured with `BLOCK_NONE` safety settings and automatic 1-by-1 API call fallback if a batch encounters errors.
 - **Options**:
   - `-r, --recursive`: Process subdirectories
   - `-n, --dry-run`: Show proposed renames without changing files

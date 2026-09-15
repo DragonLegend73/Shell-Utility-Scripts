@@ -70,11 +70,39 @@ def parse_zip_name(filename):
     """Parse '{id}_{name}.zip' -> (id, name) or None."""
     if not filename.lower().endswith('.zip'):
         return None
-    stem = filename[:-4]
+    stem = filename[:-4].strip()
     m = re.match(r'^(\d+)_(.+)$', stem)
     if m:
-        return m.group(1), m.group(2)
+        return m.group(1), m.group(2).strip()
     return None
+
+
+def parse_json_response(text):
+    """Robustly parse JSON response from Gemini, handling markdown fencing and dirty syntax."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    m = re.search(r'(\{.*\})', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Clean trailing commas before closing braces/brackets
+    cleaned = re.sub(r',(\s*[\}\]])', r'\1', text)
+    return json.loads(cleaned)
 
 
 def translate_batch(names, api_key):
@@ -135,7 +163,7 @@ RULES — follow these exactly:
 7. Use Title Case.
 8. Keep English words, numbers, and tags like [xxx] as-is.
 9. For character names you cannot identify, transliterate naturally into English (NOT pinyin with tone marks).
-10. Do NOT add explanations. Return ONLY a JSON object.
+10. Do NOT add explanations. Return ONLY a JSON object mapping original string to translated string.
 
 Input names:
 {numbered}
@@ -145,6 +173,13 @@ Return a JSON object mapping each original name to its English translation, like
 
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+        ],
         "generationConfig": {
             "temperature": 0.1,
             "responseMimeType": "application/json",
@@ -153,8 +188,7 @@ Return a JSON object mapping each original name to its English translation, like
 
     data = json.dumps(payload).encode("utf-8")
 
-    # Retry logic: 503 = capacity (retry fast), 429 = rate limit (sleep long)
-    max_retries = 10
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             req = urllib.request.Request(
@@ -165,8 +199,21 @@ Return a JSON object mapping each original name to its English translation, like
             )
             with urllib.request.urlopen(req, timeout=60) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
-            text = result["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(text)
+
+            candidates = result.get("candidates")
+            if not candidates:
+                feedback = result.get("promptFeedback", {})
+                reason = feedback.get("blockReason", "UNKNOWN")
+                raise ValueError(f"Prompt blocked by safety ({reason})")
+
+            cand = candidates[0]
+            parts = cand.get("content", {}).get("parts", [])
+            if not parts or "text" not in parts[0]:
+                finish = cand.get("finishReason", "UNKNOWN")
+                raise ValueError(f"Empty candidate response (finishReason: {finish})")
+
+            text = parts[0]["text"]
+            return parse_json_response(text)
         except urllib.error.HTTPError as e:
             if attempt >= max_retries - 1:
                 raise
@@ -175,7 +222,7 @@ Return a JSON object mapping each original name to its English translation, like
                 print(f"   ⚠ 429 rate limited, sleeping {wait}s (attempt {attempt+1})...")
                 time.sleep(wait)
             elif e.code in (500, 503):
-                print(f"   ⚠ {e.code} no capacity, retrying (attempt {attempt+1})...")
+                print(f"   ⚠ {e.code} server busy, retrying (attempt {attempt+1})...")
                 time.sleep(2)
             else:
                 raise
@@ -200,7 +247,7 @@ def clean_filename(name):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Translate Chinese/Japanese/Korean CJK folder, zip, and image names to English (or Romaji/Pinyin) using Gemini AI."
+        description="Translate Chinese/Japanese/Korean CJK zip file names to English using Gemini AI."
     )
     parser.add_argument("paths", nargs="*", default=["."], help="Directories to process")
     parser.add_argument("-n", "--dry-run", action="store_true", help="Preview without renaming")
@@ -270,7 +317,22 @@ def main():
                 save_cache(cache)
                 print(f"   ✓ Got {len(result)} translation(s)\n")
             except Exception as e:
-                print(f"   ✗ API error: {e}\n", file=sys.stderr)
+                print(f"   ⚠ Batch error ({e}), falling back to item-by-item Gemini API calls...")
+                fallback_success = 0
+                for single_name in batch:
+                    try:
+                        res = translate_batch([single_name], api_key)
+                        if res and single_name in res:
+                            translations.update(res)
+                            cache.update(res)
+                            fallback_success += 1
+                        else:
+                            print(f"   ↳ Skipping '{single_name}' (API response missing key)")
+                    except Exception as single_err:
+                        print(f"   ↳ Skipping '{single_name}' ({single_err})")
+                save_cache(cache)
+                print(f"   ✓ Translated {fallback_success}/{len(batch)} item(s) via individual API calls\n")
+
             if batch_num < total_batches:
                 time.sleep(10)  # respect free-tier rate limits
 
