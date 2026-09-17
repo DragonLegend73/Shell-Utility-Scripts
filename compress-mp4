@@ -20,7 +20,7 @@ function show_help
     echo "Usage: compress-mp4 [-c N] [-p N] [-r] [-k] [-h] [FILE/DIR...]"
     echo ""
     echo "Compresses .mp4/.mkv/.mov/.avi videos to AV1 format (.av1.mp4) using SVT-AV1,"
-    echo "trashing original files after successful compression."
+    echo "trashing the larger of the two files after successful compression."
     echo ""
     echo "Options:"
     echo "  -c, --crf N        Constant Rate Factor, 0-63 (default: 28, lower = higher quality)"
@@ -184,7 +184,13 @@ for v in $input_videos
         printf "  -> Done: %.1f MiB -> %.1f MiB (%.1f%% space saved)\n\n" $src_mb $out_mb $reduction_file
 
         if not set -q _flag_keep
-            gio trash -- "$v"
+            if test $output_size -ge $source_size
+                gio trash -- "$out"
+                echo "  -> Note: Compressed file was larger, trashed it instead."
+                set total_output_bytes (math "$total_output_bytes - $output_size + $source_size")
+            else
+                gio trash -- "$v"
+            end
         end
     else
         set failed (math $failed + 1)
