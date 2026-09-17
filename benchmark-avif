@@ -187,7 +187,8 @@ rm -f "$size_table" "$sample_table"
 set timestamp (date '+%Y%m%d-%H%M%S')
 set outdir "$PWD/avif-benchmark-$timestamp"
 set tmpdir "$outdir/.tmp"
-mkdir -p "$outdir" "$tmpdir"
+set originals_dir "$outdir/originals"
+mkdir -p "$outdir" "$tmpdir" "$originals_dir"
 set csv "$outdir/results.csv"
 
 printf '%s\n' \
@@ -207,7 +208,14 @@ echo "Output:         $outdir"
 echo "========================================"
 echo ""
 echo "Selected images:"
+set image_number 0
 for f in $files
+    set image_number (math "$image_number + 1")
+    set filename (basename "$f")
+    set stem (string replace -r '(?i)\.(jpe?g|png)$' '' -- "$filename")
+    set ext (string match -r -i '\.[^.]+$' -- "$filename")
+    set dest "$originals_dir/"(printf "%03d_%s%s" $image_number "$stem" "$ext")
+    cp -- "$f" "$dest"
     echo "  $f"
 end
 echo ""
