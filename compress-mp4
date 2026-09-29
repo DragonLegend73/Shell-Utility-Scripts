@@ -1,11 +1,11 @@
 #!/usr/bin/env fish
-# Compresses MP4/video files to AV1 (libsvtav1 + libopus) for optimal archival storage.
+# Compresses MP4/video/GIF files to AV1 (libsvtav1 + libopus) for optimal archival storage.
 #
 # Default:
 #   Video Codec: SVT-AV1
 #   CRF:         28 (Visually transparent high-compression archival)
 #   Preset:      6  (Optimal balance of encoding speed & compression efficiency)
-#   Audio Codec: Opus (128 kbps stereo)
+#   Audio Codec: Opus (128 kbps stereo)  — skipped for GIFs
 #
 # Shows:
 #   - total conversion time
@@ -19,7 +19,7 @@
 function show_help
     echo "Usage: compress-mp4 [-c N] [-p N] [-r] [-k] [-h] [FILE/DIR...]"
     echo ""
-    echo "Compresses .mp4/.mkv/.mov/.avi videos to AV1 format (.av1.mp4) using SVT-AV1,"
+    echo "Compresses .mp4/.mkv/.mov/.avi/.gif to AV1 format (.av1.mp4) using SVT-AV1,"
     echo "trashing the larger of the two files after successful compression."
     echo ""
     echo "Options:"
@@ -84,7 +84,7 @@ if not ffmpeg -encoders 2>/dev/null | string match -q '*libsvtav1*'
     exit 1
 end
 
-# Collect video files
+# Collect video + GIF files
 set targets $argv
 
 if test (count $targets) -gt 0
@@ -93,7 +93,10 @@ if test (count $targets) -gt 0
         if test -f "$t"
             set -a videos "$t"
         else if test -d "$t"
-            set sub_v (find "$t" -type f \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.avi' \) -print)
+            set sub_v (find "$t" -type f \( \
+                -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o \
+                -iname '*.avi' -o -iname '*.gif' \
+            \) -print)
             set -a videos $sub_v
         end
     end
@@ -102,10 +105,13 @@ else if set -q _flag_recursive
         -iname '*.mp4' -o \
         -iname '*.mkv' -o \
         -iname '*.mov' -o \
-        -iname '*.avi' \
+        -iname '*.avi' -o \
+        -iname '*.gif' \
     \) -print)
 else
-    set videos (path filter -f *.mp4 *.MP4 *.mkv *.MKV *.mov *.MOV *.avi *.AVI 2>/dev/null)
+    set videos (path filter -f \
+        *.mp4 *.MP4 *.mkv *.MKV *.mov *.MOV *.avi *.AVI *.gif *.GIF \
+        2>/dev/null)
 end
 
 # Filter out already encoded .av1.mp4 outputs
@@ -118,7 +124,7 @@ for v in $videos
 end
 
 if test (count $input_videos) -eq 0
-    echo "No video files found to compress."
+    echo "No video or GIF files found to compress."
     exit 0
 end
 
@@ -133,13 +139,13 @@ set total_output_bytes 0
 set start_ns (date +%s%N)
 
 echo "========================================"
-echo "AV1 VIDEO ARCHIVAL COMPRESSOR"
+echo "AV1 VIDEO / GIF ARCHIVAL COMPRESSOR"
 echo "========================================"
-echo "Files:     $total video(s)"
+echo "Files:     $total file(s)"
 echo "Codec:     AV1 (libsvtav1)"
 echo "CRF:       $crf"
 echo "Preset:    $preset"
-echo "Audio:     Opus (128k)"
+echo "Audio:     Opus (128k) — skipped for GIFs"
 echo "========================================"
 echo ""
 
@@ -147,7 +153,7 @@ for v in $input_videos
     set processed (math $processed + 1)
     set dir (dirname -- "$v")
     set base (basename -- "$v")
-    set stem (string replace -r '(?i)\.(mp4|mkv|mov|avi)$' '' -- "$base")
+    set stem (string replace -r '(?i)\.(mp4|mkv|mov|avi|gif)$' '' -- "$base")
     set out "$dir/$stem.av1.mp4"
 
     set source_size (stat -c %s -- "$v")
@@ -155,21 +161,36 @@ for v in $input_videos
 
     echo "[$processed/$total] Encoding: $v"
 
-    # Audio stream check
-    set has_audio (ffprobe -v error -select_streams a -show_entries stream=codec_type -of default=nw=1:nk=1 -- "$v" 2>/dev/null)
+    # Detect if this is a GIF (always no audio)
+    set is_gif 0
+    if string match -qi '*.gif' -- "$v"
+        set is_gif 1
+    end
 
-    if test -n "$has_audio"
-        ffmpeg -y -hide_banner -loglevel error -stats \
-            -i "$v" \
-            -c:v libsvtav1 -preset $preset -crf $crf \
-            -c:a libopus -b:a 128k \
-            -- "$out"
-    else
+    if test $is_gif -eq 1
+        # GIF → AV1 (no audio)
         ffmpeg -y -hide_banner -loglevel error -stats \
             -i "$v" \
             -c:v libsvtav1 -preset $preset -crf $crf \
             -an \
             -- "$out"
+    else
+        # Normal video
+        set has_audio (ffprobe -v error -select_streams a -show_entries stream=codec_type -of default=nw=1:nk=1 -- "$v" 2>/dev/null)
+
+        if test -n "$has_audio"
+            ffmpeg -y -hide_banner -loglevel error -stats \
+                -i "$v" \
+                -c:v libsvtav1 -preset $preset -crf $crf \
+                -c:a libopus -b:a 128k \
+                -- "$out"
+        else
+            ffmpeg -y -hide_banner -loglevel error -stats \
+                -i "$v" \
+                -c:v libsvtav1 -preset $preset -crf $crf \
+                -an \
+                -- "$out"
+        end
     end
 
     set encode_status $status
