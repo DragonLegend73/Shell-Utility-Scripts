@@ -2,7 +2,7 @@
 # Compresses MP4/video/GIF files to AV1 (libsvtav1 + libopus) for optimal archival storage.
 #
 # Default:
-#   Video Codec: SVT-AV1
+#   Video Codec: SVT-AV1 (10-bit, tune=0 visual quality)
 #   CRF:         28 (Visually transparent high-compression archival)
 #   Preset:      6  (Optimal balance of encoding speed & compression efficiency)
 #   Audio Codec: Opus (128 kbps stereo)  — skipped for GIFs
@@ -142,7 +142,7 @@ echo "========================================"
 echo "AV1 VIDEO / GIF ARCHIVAL COMPRESSOR"
 echo "========================================"
 echo "Files:     $total file(s)"
-echo "Codec:     AV1 (libsvtav1)"
+echo "Codec:     AV1 (libsvtav1, 10-bit, tune=0)"
 echo "CRF:       $crf"
 echo "Preset:    $preset"
 echo "Audio:     Opus (128k) — skipped for GIFs"
@@ -172,6 +172,7 @@ for v in $input_videos
         ffmpeg -y -hide_banner -loglevel error -stats \
             -i "$v" \
             -c:v libsvtav1 -preset $preset -crf $crf \
+            -pix_fmt yuv420p10le -svtav1-params tune=0 \
             -an \
             -- "$out"
     else
@@ -182,12 +183,14 @@ for v in $input_videos
             ffmpeg -y -hide_banner -loglevel error -stats \
                 -i "$v" \
                 -c:v libsvtav1 -preset $preset -crf $crf \
+                -pix_fmt yuv420p10le -svtav1-params tune=0 \
                 -c:a libopus -b:a 128k \
                 -- "$out"
         else
             ffmpeg -y -hide_banner -loglevel error -stats \
                 -i "$v" \
                 -c:v libsvtav1 -preset $preset -crf $crf \
+                -pix_fmt yuv420p10le -svtav1-params tune=0 \
                 -an \
                 -- "$out"
         end
