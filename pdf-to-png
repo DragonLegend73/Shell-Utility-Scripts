@@ -5,6 +5,17 @@
 #
 # Requirements: poppler (pdfimages), stat, sort.
 
+function progress_bar --argument-names current total label extra
+    set pct (math "floor(100 * $current / $total)")
+    set bar_w 30
+    set filled (math "round($bar_w * $current / $total)")
+    set empty (math "$bar_w - $filled")
+    set fill_str (string repeat -n (math "max(0, $filled)") '#')
+    set empty_str (string repeat -n (math "max(0, $empty)") '-')
+    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
+    test -n "$extra"; and printf "  %s" "$extra"
+end
+
 function show_help
     echo "Usage: pdf-to-png [-r] [-k] [-h]"
     echo ""
@@ -63,10 +74,15 @@ set total (count $pdfs)
 set n 1
 set processed_pdfs
 
+set successful_count 0
+set failed_count 0
+set total_pages_count 0
+set trashed_count 0
+
 echo "========================================"
 echo "PDF TO PNG EXTRACTOR"
 echo "========================================"
-echo "PDF files: $total"
+echo "PDF files:  $total"
 echo "========================================"
 echo ""
 
@@ -76,6 +92,9 @@ for pdf in $pdfs
     set dir (dirname -- "$pdf")
     set base (basename -- "$pdf")
     set name (string replace -r '(?i)\.pdf$' '' -- "$base")
+    
+    progress_bar $n $total "Extracting" ""
+    echo ""
     echo "[$n/$total] Processing: $pdf"
 
     set out_dir "$dir/$name"
@@ -100,9 +119,12 @@ for pdf in $pdfs
         set -a processed_pdfs "$pdf"
         set page_count (math $p - 1)
         echo "  -> Extracted $page_count page(s) to $out_dir/"
+        set successful_count (math $successful_count + 1)
+        set total_pages_count (math $total_pages_count + $page_count)
     else
         echo "  -> Warning: No images extracted from '$pdf'." >&2
         rmdir "$out_dir" 2>/dev/null
+        set failed_count (math $failed_count + 1)
     end
 
     rm -rf "$tmp_dir"
@@ -111,12 +133,20 @@ end
 
 if not set -q _flag_keep; and test (count $processed_pdfs) -gt 0
     gio trash -- $processed_pdfs
+    set trashed_count (count $processed_pdfs)
 end
 
 set end_ns (date +%s%N)
-set total_seconds (math "($end_ns - $start_ns) / 1000000000")
+set total_seconds (math -s 2 "($end_ns - $start_ns) / 1000000000")
 
-echo ""
+printf "\r\033[K"
 echo "========================================"
-echo "Total time:" (printf '%.2f' $total_seconds) "seconds"
+echo "SUMMARY"
+echo "========================================"
+echo "Successful:          $successful_count"
+echo "Failed:              $failed_count"
+echo "Total pages:         $total_pages_count"
+echo "PDFs trashed:        $trashed_count"
+echo "Total time:          $total_seconds seconds"
+echo "========================================"
 echo "Done."

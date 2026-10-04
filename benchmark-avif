@@ -24,6 +24,17 @@ test $encoder_threads -lt 1; and set encoder_threads 1
 set metric_jobs 3
 set quality_list 30 40 50 60
 
+function progress_bar --argument-names current total label extra
+    set pct (math "floor(100 * $current / $total)")
+    set bar_w 30
+    set filled (math "round($bar_w * $current / $total)")
+    set empty (math "$bar_w - $filled")
+    set fill_str (string repeat -n (math "max(0, $filled)") '#')
+    set empty_str (string repeat -n (math "max(0, $empty)") '-')
+    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
+    test -n "$extra"; and printf "  %s" "$extra"
+end
+
 function show_help
     echo "Usage: benchmark-avif [-s N] [-n N] [-t N] [-j N] [-h]"
     echo ""
@@ -254,16 +265,16 @@ for quality in $quality_list
         set elapsed (math "($file_end_ns - $file_start_ns) / 1000000000")
 
         if test $encode_status -ne 0; or not test -f "$output"
-            printf "\r  [%d/%d] FAILED: q%s %s\n" $combo_num $total_combos "$quality" "$filename"
+            printf "\r\033[K  [%d/%d] FAILED: q%s %s\n" $combo_num $total_combos "$quality" "$filename"
             echo "FAIL $elapsed" >> "$encode_times_file"
         else
             echo "$elapsed" >> "$encode_times_file"
         end
 
-        printf "\r  Encoding: [%d/%d] q%s" $combo_num $total_combos "$quality"
+        progress_bar $combo_num $total_combos "Encoding" "q$quality"
     end
 end
-echo ""
+printf "\r\033[K"
 echo "  Encoding complete."
 echo ""
 
@@ -313,11 +324,23 @@ end
 
 echo "  Running $total_metric_jobs metric jobs across $metric_jobs workers..."
 
-# Run all metric jobs in parallel
-parallel --colsep '\t' -j $metric_jobs --bar \
+# Run parallel in background, suppress its progress output
+parallel --colsep '\t' -j $metric_jobs \
     bash "$metric_script" {1} {2} {3} {4} {5} \
-    < "$job_list"
+    < "$job_list" 2>/dev/null &
+set parallel_pid $last_pid
 
+# Poll for completion
+while kill -0 $parallel_pid 2>/dev/null
+    set completed (count (path filter -f $tmpdir/metric_q*_*.txt 2>/dev/null))
+    progress_bar $completed $total_metric_jobs "Metrics" "$metric_jobs workers"
+    sleep 0.5
+end
+wait $parallel_pid
+
+# Final update
+progress_bar $total_metric_jobs $total_metric_jobs "Metrics" "$metric_jobs workers"
+printf "\r\033[K"
 echo "  Metrics complete."
 echo ""
 

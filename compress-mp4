@@ -30,6 +30,17 @@ function show_help
     echo "  -h, --help         Show this help and exit"
 end
 
+function progress_bar --argument-names current total label extra
+    set pct (math "floor(100 * $current / $total)")
+    set bar_w 30
+    set filled (math "round($bar_w * $current / $total)")
+    set empty (math "$bar_w - $filled")
+    set fill_str (string repeat -n (math "max(0, $filled)") '#')
+    set empty_str (string repeat -n (math "max(0, $empty)") '-')
+    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
+    test -n "$extra"; and printf "  %s" "$extra"
+end
+
 argparse \
     'c/crf=' \
     'p/preset=' \
@@ -136,6 +147,12 @@ set failed 0
 set total_source_bytes 0
 set total_output_bytes 0
 
+set orig_trashed_count 0
+set orig_trashed_bytes 0
+set out_trashed_count 0
+set out_trashed_bytes 0
+set kept_count 0
+
 set start_ns (date +%s%N)
 
 echo "========================================"
@@ -149,6 +166,8 @@ echo "Audio:     Opus (128k) — skipped for GIFs"
 echo "========================================"
 echo ""
 
+set running_saved_bytes 0
+
 for v in $input_videos
     set processed (math $processed + 1)
     set dir (dirname -- "$v")
@@ -159,6 +178,9 @@ for v in $input_videos
     set source_size (stat -c %s -- "$v")
     set total_source_bytes (math $total_source_bytes + $source_size)
 
+    set running_saved_mib (printf "%.1f" (math "$running_saved_bytes / 1048576"))
+    progress_bar (math $processed - 1) $total "Compressing" "$running_saved_mib MiB saved"
+    echo ""
     echo "[$processed/$total] Encoding: $v"
 
     # Detect if this is a GIF (always no audio)
@@ -209,13 +231,24 @@ for v in $input_videos
 
         if not set -q _flag_keep
             if test $output_size -ge $source_size
-                gio trash -- "$out"
+                gio trash -- "$out" >/dev/null 2>&1
+                if test $status -eq 0
+                    set out_trashed_count (math $out_trashed_count + 1)
+                    set out_trashed_bytes (math $out_trashed_bytes + $output_size)
+                end
                 echo "  -> Note: Compressed file was larger, trashed it instead."
                 set total_output_bytes (math "$total_output_bytes - $output_size + $source_size")
             else
-                gio trash -- "$v"
+                gio trash -- "$v" >/dev/null 2>&1
+                if test $status -eq 0
+                    set orig_trashed_count (math $orig_trashed_count + 1)
+                    set orig_trashed_bytes (math $orig_trashed_bytes + $source_size)
+                end
             end
+        else
+            set kept_count (math $kept_count + 1)
         end
+        set running_saved_bytes (math "$total_source_bytes - $total_output_bytes")
     else
         set failed (math $failed + 1)
         echo "  -> ERROR: Failed to compress '$v'" >&2
@@ -223,10 +256,14 @@ for v in $input_videos
     end
 end
 
+set running_saved_mib (printf "%.1f" (math "$running_saved_bytes / 1048576"))
+progress_bar $total $total "Compressing" "$running_saved_mib MiB saved"
+
 set end_ns (date +%s%N)
 set total_seconds (math "($end_ns - $start_ns) / 1000000000")
 set successful (math $total - $failed)
 
+printf "\n\r\033[K\n"
 echo "========================================"
 echo "COMPRESSION SUMMARY"
 echo "========================================"
@@ -254,6 +291,10 @@ echo "Original size:       "(printf "%.2f" $source_mib)" MiB"
 echo "AV1 size:            "(printf "%.2f" $output_mib)" MiB"
 echo "Space saved:         "(printf "%.2f" $saved_mib)" MiB"
 echo "Size reduction:      "(printf "%.2f" $reduction)"%"
+set orig_trashed_mib (math "$orig_trashed_bytes / 1048576")
+set out_trashed_mib (math "$out_trashed_bytes / 1048576")
+echo "Originals trashed:   $orig_trashed_count ("(printf "%.2f" $orig_trashed_mib)" MiB)"
+echo "Outputs trashed:     $out_trashed_count ("(printf "%.2f" $out_trashed_mib)" MiB)"
 echo "Total time:          "(printf "%.2f" $total_seconds)" seconds"
 echo "Throughput:          "(printf "%.2f" $throughput)" MiB/s"
 echo "========================================"

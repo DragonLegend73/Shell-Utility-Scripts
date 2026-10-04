@@ -13,6 +13,17 @@
 #   Automatically tries passwords from:
 #     ~/.config/archive-passwords.txt (or custom path via -p)
 
+function progress_bar --argument-names current total label extra
+    set pct (math "floor(100 * $current / $total)")
+    set bar_w 30
+    set filled (math "round($bar_w * $current / $total)")
+    set empty (math "$bar_w - $filled")
+    set fill_str (string repeat -n (math "max(0, $filled)") '#')
+    set empty_str (string repeat -n (math "max(0, $empty)") '-')
+    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
+    test -n "$extra"; and printf "  %s" "$extra"
+end
+
 set password_file ~/.config/archive-passwords.txt
 
 function show_help
@@ -75,8 +86,6 @@ if test -f "$password_file"
 
         set -a stored_passwords "$line"
     end < "$password_file"
-
-    echo "Loaded "(count $stored_passwords)" stored password(s)."
 end
 
 set session_passwords
@@ -103,18 +112,36 @@ if test (count $archives) -eq 0
 end
 
 set archives (printf '%s\n' $archives | sort -V)
+set total_archives (count $archives)
+
+echo "========================================"
+echo "ARCHIVE EXTRACTOR"
+echo "========================================"
+echo "Archives:   $total_archives file(s)"
+echo "Encoding:   $zip_encoding"
+echo "Passwords:  "(count $stored_passwords)" stored"
+echo "========================================"
 
 # -------------------------------------------------------------------
 # Extract archives
 # -------------------------------------------------------------------
+
+set successful_count 0
+set failed_count 0
+set trashed_count 0
+set trashed_size 0
+set kept_count 0
+set current_archive_num 1
+set start_ns (date +%s%N)
 
 for archive in $archives
     set dir (dirname -- "$archive")
     set base (basename -- "$archive")
     set base (string replace -r '(?i)\.(zip|rar|7z)$' '' -- "$base")
 
+    progress_bar $current_archive_num $total_archives "Extracting" ""
     echo ""
-    echo "Extracting: $archive"
+    echo "[$current_archive_num/$total_archives] Extracting: $archive"
 
     if set -q _flag_flatten
         set output_dir "$dir"
@@ -185,15 +212,47 @@ for archive in $archives
 
     # 6. Check extraction result
     if test $extract_status -eq 0
-        echo "Extraction successful."
+        set successful_count (math $successful_count + 1)
+        set extr_files (find "$output_dir" -type f 2>/dev/null)
+        set extr_count (count $extr_files)
+        set extr_size 0
+        for f in $extr_files
+            set f_size (stat -c %s -- "$f" 2>/dev/null; or echo 0)
+            set extr_size (math $extr_size + $f_size)
+        end
+        echo "Extraction successful ($extr_count files, "(math -s 2 "$extr_size / 1048576")" MiB)."
         if not set -q _flag_keep
+            set a_size (stat -c %s -- "$archive" 2>/dev/null; or echo 0)
             gio trash -- "$archive"
+            set trashed_count (math $trashed_count + 1)
+            set trashed_size (math $trashed_size + $a_size)
+        else
+            set kept_count (math $kept_count + 1)
         end
     else
+        set failed_count (math $failed_count + 1)
         echo ""
         echo "ERROR: Failed to extract '$archive'." >&2
         echo "Archive was NOT trashed." >&2
     end
+    
+    set current_archive_num (math $current_archive_num + 1)
 end
 
 rm -f /tmp/unzip-all-output.txt
+
+set end_ns (date +%s%N)
+set total_seconds (math -s 2 "($end_ns - $start_ns) / 1000000000")
+set trashed_mb (math -s 2 "$trashed_size / 1048576")
+
+printf "\r\033[K"
+echo "========================================"
+echo "SUMMARY  "
+echo "========================================"
+echo "Successful:          $successful_count"
+echo "Failed:              $failed_count"
+echo "Archives trashed:    $trashed_count ($trashed_mb MiB)"
+echo "Archives kept:       $kept_count"
+echo "Total time:          $total_seconds seconds"
+echo "========================================"
+echo "Done."

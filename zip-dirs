@@ -25,10 +25,9 @@ for cmd in zip
     end
 end
 
-set has_gio 1
-if not command -q gio
+if not set -q _flag_keep; and not command -q gio
     echo "Warning: 'gio' command not found. Original directories will be kept." >&2
-    set has_gio 0
+    set _flag_keep 1
 end
 
 set dirs
@@ -45,14 +44,91 @@ if test (count $dirs) -eq 0
     exit 0
 end
 
+function progress_bar --argument-names current total label extra
+    set pct (math "floor(100 * $current / $total)")
+    set bar_w 30
+    set filled (math "round($bar_w * $current / $total)")
+    set empty (math "$bar_w - $filled")
+    set fill_str (string repeat -n (math "max(0, $filled)") '#')
+    set empty_str (string repeat -n (math "max(0, $empty)") '-')
+    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
+    test -n "$extra"; and printf "  %s" "$extra"
+end
+
+set total_dirs (count $dirs)
+set current_dir 0
+set success_zips 0
+set fail_zips 0
+set total_zip_size 0
+set trashed_count 0
+set removed_count 0
+set trashed_size 0
+set kept_count 0
+
+set start_time (date +%s%N)
+
+echo "========================================"
+echo "ZIP-DIRS"
+echo "========================================"
+echo "Directories found: $total_dirs"
+echo "========================================"
+echo ""
+
 for d in $dirs
-    echo "Zipping directory: $d"
+    set current_dir (math $current_dir + 1)
+    
+    progress_bar (math "$current_dir - 1") $total_dirs "Zipping" ""
+    echo ""
+    echo "[$current_dir/$total_dirs] Zipping directory: $d"
+
     zip -r "$d.zip" "$d"
-    if test $status -eq 0
-        if test $has_gio -eq 1; and not set -q _flag_keep
-            gio trash -- "$d"
+    
+    if test $status -ne 0
+        echo "Error: Failed to zip '$d'. Directory was NOT trashed." >&2
+        set fail_zips (math $fail_zips + 1)
+        continue
+    end
+
+    set success_zips (math $success_zips + 1)
+    set z_size (stat -c %s "$d.zip")
+    set total_zip_size (math $total_zip_size + $z_size)
+    set z_size_mb (math -s2 "$z_size / 1048576")
+
+    if not set -q _flag_keep
+        set item_size (stat -c %s "$d" 2>/dev/null; or echo 0)
+        if gio trash -- "$d" >/dev/null 2>&1
+            set trashed_count (math $trashed_count + 1)
+            set trashed_size (math $trashed_size + $item_size)
+            echo "Done: $d.zip ($z_size_mb MiB) - Trashed 1 item"
+        else if rm -rf -- "$d" >/dev/null 2>&1
+            set removed_count (math $removed_count + 1)
+            set trashed_size (math $trashed_size + $item_size)
+            echo "Done: $d.zip ($z_size_mb MiB) - Removed 1 item"
+        else
+            echo "Done: $d.zip ($z_size_mb MiB) - Failed to trash/remove item"
         end
     else
-        echo "Error: Failed to zip '$d'. Directory was NOT trashed." >&2
+        set kept_count (math $kept_count + 1)
+        echo "Done: $d.zip ($z_size_mb MiB) - Kept 1 item"
     end
 end
+
+set end_time (date +%s%N)
+set elapsed_secs (math -s2 "($end_time - $start_time) / 1000000000")
+set total_zip_size_mb (math -s2 "$total_zip_size / 1048576")
+set trashed_size_mb (math -s2 "$trashed_size / 1048576")
+
+progress_bar $total_dirs $total_dirs "Zipping" "Completed"
+printf "\r\033[K"
+echo "========================================"
+echo "SUMMARY"
+echo "========================================"
+echo "Zips created:        $success_zips"
+echo "Failed:              $fail_zips"
+echo "Total zip size:      $total_zip_size_mb MiB"
+set total_trashed_count (math $trashed_count + $removed_count)
+echo "Items trashed:       $total_trashed_count ($trashed_size_mb MiB)"
+echo "Items kept:          $kept_count"
+echo "Total time:          $elapsed_secs seconds"
+echo "========================================"
+echo "Done."

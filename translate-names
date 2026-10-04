@@ -53,6 +53,19 @@ def load_cache():
     return {}
 
 
+def progress_bar(current, total, label, extra=""):
+    pct = int(100 * current / total) if total > 0 else 0
+    bar_w = 30
+    filled = round(bar_w * current / total) if total > 0 else 0
+    empty = bar_w - filled
+    bar = '#' * filled + '-' * empty
+    line = f"\r\033[K{label:<12s} [{bar}]  {pct:3d}%  ({current}/{total})"
+    if extra:
+        line += f"  {extra}"
+    sys.stdout.write(line)
+    sys.stdout.flush()
+
+
 def save_cache(cache):
     try:
         os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
@@ -246,6 +259,7 @@ def clean_filename(name):
 
 
 def main():
+    start_time = time.time()
     parser = argparse.ArgumentParser(
         description="Translate Chinese/Japanese/Korean CJK zip file names to English using Gemini AI."
     )
@@ -301,22 +315,30 @@ def main():
     if translations:
         print(f"📦 {len(translations)} translation(s) loaded from cache\n")
 
+    cache_hits = len(translations)
+    total_batches = 0
     if uncached:
         total_batches = (len(uncached) + BATCH_SIZE - 1) // BATCH_SIZE
         for i in range(0, len(uncached), BATCH_SIZE):
             batch = uncached[i : i + BATCH_SIZE]
             batch_num = i // BATCH_SIZE + 1
-            print(f"⏳ Translating batch {batch_num}/{total_batches} ({len(batch)} names)...")
+            progress_bar(batch_num - 1, total_batches, "Translating", f"cache: {cache_hits}")
             try:
                 if not api_key:
+                    sys.stdout.write("\r\033[K")
+                    sys.stdout.flush()
                     print("Error: Gemini API Key not found. Pass --api-key, export GEMINI_API_KEY=..., or save to ~/.config/gemini-api-key", file=sys.stderr)
                     sys.exit(1)
                 result = translate_batch(batch, api_key)
                 translations.update(result)
                 cache.update(result)
                 save_cache(cache)
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
                 print(f"   ✓ Got {len(result)} translation(s)\n")
             except Exception as e:
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
                 print(f"   ⚠ Batch error ({e}), falling back to item-by-item Gemini API calls...")
                 fallback_success = 0
                 for single_name in batch:
@@ -336,16 +358,24 @@ def main():
             if batch_num < total_batches:
                 time.sleep(10)  # respect free-tier rate limits
 
+        progress_bar(total_batches, total_batches, "Translating", f"cache: {cache_hits}")
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+
     # ── Apply renames ─────────────────────────────────────────────────────
     renamed = 0
     skipped = 0
+    skipped_details = []
+    total_files = len(targets)
 
-    for full_path, file_id, cjk_name in sorted(targets, key=lambda t: t[1]):
+    for idx, (full_path, file_id, cjk_name) in enumerate(sorted(targets, key=lambda t: t[1])):
+        progress_bar(idx, total_files, "Renaming", f"{skipped} skipped")
         old_basename = os.path.basename(full_path)
         eng = translations.get(cjk_name)
 
         if not eng or contains_cjk(eng):
-            print(f"  SKIP  {old_basename}")
+            reason = "no translation available" if not eng else "translation contains CJK"
+            skipped_details.append(f"  {old_basename} — {reason}")
             skipped += 1
             continue
 
@@ -367,21 +397,45 @@ def main():
         new_path = os.path.join(os.path.dirname(full_path), new_basename)
 
         if args.dry_run:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
             print(f"  {old_basename}")
             print(f"    → {new_basename}\n")
         else:
             try:
                 os.rename(full_path, new_path)
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
                 print(f"  {old_basename}")
                 print(f"    → {new_basename}\n")
             except Exception as e:
+                sys.stdout.write("\r\033[K")
+                sys.stdout.flush()
                 print(f"  ERROR {old_basename}: {e}", file=sys.stderr)
+                skipped_details.append(f"  {old_basename} — error: {e}")
                 skipped += 1
                 continue
         renamed += 1
 
-    verb = "would be renamed" if args.dry_run else "renamed"
-    print(f"Done. {renamed} file(s) {verb}, {skipped} skipped.")
+    progress_bar(total_files, total_files, "Renaming", f"{skipped} skipped")
+    sys.stdout.write("\r\033[K\n")
+    sys.stdout.flush()
+
+    elapsed = time.time() - start_time
+    print("========================================")
+    print("SUMMARY")
+    print("========================================")
+    print(f"Renamed:             {renamed}")
+    print(f"Skipped:             {skipped}")
+    print(f"Cached:              {cache_hits}")
+    print(f"API calls:           {total_batches} batches")
+    print(f"Total time:          {elapsed:.2f} seconds")
+    print("========================================\n")
+
+    if skipped_details:
+        print("Skipped files:")
+        for detail in skipped_details:
+            print(detail)
 
 
 if __name__ == "__main__":
