@@ -18,7 +18,7 @@
 
 set speed 6
 set sample_limit 5
-set ssimulacra_threshold 70
+set ssimulacra_threshold 75
 set encoder_threads (math (nproc) - 2)
 test $encoder_threads -lt 1; and set encoder_threads 1
 set metric_jobs 3
@@ -29,7 +29,7 @@ function show_help
     echo ""
     echo "  -s, --speed N       AVIF encoder speed (default: 6)"
     echo "  -n, --sample N      Maximum images to test (default: 5)"
-    echo "  -t, --threshold N   SSIMULACRA 2 recommendation threshold (default: 70)"
+    echo "  -t, --threshold N   SSIMULACRA 2 recommendation threshold (default: 75)"
     echo "  -j, --jobs N        Parallel metric jobs (default: 3)"
     echo "  -h, --help          Show this help"
 end
