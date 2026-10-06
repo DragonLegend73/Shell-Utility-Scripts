@@ -1,0 +1,69 @@
+#!/usr/bin/env fish
+
+set dir $HOME/.local/bin
+set state $HOME/.local/state/tools
+
+mkdir -p $HOME/.local/state
+touch $state
+
+# Find executable scripts in ~/.local/bin, excluding tools itself
+set scripts
+for file in $dir/*
+    if test -f "$file"; and test -x "$file"
+        set name (basename "$file")
+        if test "$name" != tools
+            set scripts $scripts $name
+        end
+    end
+end
+
+# Read usage history
+set used (cat $state)
+
+# Reverse the usage history so the most recently used is first
+set used_reversed
+for u in $used
+    set used_reversed $u $used_reversed
+end
+
+set ordered
+# Add recently used scripts first (newest to oldest)
+for script in $used_reversed
+    if contains -- $script $scripts
+        if not contains -- $script $ordered
+            set ordered $ordered $script
+        end
+    end
+end
+
+# Add scripts that have never been used
+for script in $scripts
+    if not contains -- $script $ordered
+        set ordered $ordered $script
+    end
+end
+
+# fzf default layout displays the first item at the bottom (closest to the prompt).
+# Since our ordered list starts with the most recently used, it will appear at the bottom.
+set script (printf '%s\n' $ordered | fzf --prompt='tools > ')
+if test -z "$script"
+    exit 0
+end
+
+# Prompt for arguments
+read -P 'Args> ' args
+
+# Update usage history by moving the selected script to the end (newest)
+begin
+    for item in $used
+        if test "$item" != "$script"
+            echo $item
+        end
+    end
+    echo $script
+end > $state.tmp
+
+mv $state.tmp $state
+
+# Execute the selected script with the provided arguments
+eval (string escape -- "$dir/$script") $args
