@@ -43,8 +43,8 @@ set -g __pb_state 0 "" ""
 
 function pb_start
     isatty stdout; or return
-    set -g __pb_rows (tput lines 2>/dev/null)
-    string match -qr '^\d+$' -- "$__pb_rows"; or return
+    set -g __pb_rows $LINES
+    test -z "$__pb_rows"; and set -g __pb_rows 24
     test $__pb_rows -ge 5; or return
     printf '\n\x1b7\x1b[1;%dr\x1b8\x1b[A' (math $__pb_rows - 1)
     set -g __pb_on 1
@@ -54,7 +54,8 @@ end
 function pb_draw --argument-names frac label info
     set -g __pb_state $frac "$label" "$info"
     test $__pb_on -eq 1; or return
-    set -l cols (tput cols 2>/dev/null; or echo 80)
+    set -l cols $COLUMNS
+    test -z "$cols"; and set cols 80
     set -l f (math "min(1, max(0, $frac))")
     set -l pct (math "floor(100 * $f)")
     set -l bw 40
@@ -83,7 +84,8 @@ end
 
 function __pb_on_winch --on-signal WINCH
     test $__pb_on -eq 1; or return
-    set -g __pb_rows (tput lines 2>/dev/null)
+    set -g __pb_rows $LINES
+    test -z "$__pb_rows"; and set -g __pb_rows 24
     printf '\x1b7\x1b[1;%dr\x1b8' (math $__pb_rows - 1)
     pb_draw $__pb_state
 end
