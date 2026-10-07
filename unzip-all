@@ -13,15 +13,71 @@
 #   Automatically tries passwords from:
 #     ~/.config/archive-passwords.txt (or custom path via -p)
 
-function progress_bar --argument-names current total label extra
-    set pct (math "floor(100 * $current / $total)")
-    set bar_w 30
-    set filled (math "round($bar_w * $current / $total)")
-    set empty (math "$bar_w - $filled")
-    set fill_str (string repeat -n (math "max(0, $filled)") '#')
-    set empty_str (string repeat -n (math "max(0, $empty)") '-')
-    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
-    test -n "$extra"; and printf "  %s" "$extra"
+# ───────────── pinned progress bar (bottom row) ─────────────
+set -g __pb_on 0
+set -g __pb_rows 0
+set -g __pb_state 0 "" ""
+
+function pb_start
+    isatty stdout; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    string match -qr '^\d+$' -- "$__pb_rows"; or return
+    test $__pb_rows -ge 5; or return
+    # newline (make room), save cursor, shrink scroll region, restore cursor, step back up
+    printf '\n\x1b7\x1b[1;%dr\x1b8\x1b[A' (math $__pb_rows - 1)
+    set -g __pb_on 1
+end
+
+# usage: pb_draw FRACTION(0..1) LABEL INFO
+function pb_draw --argument-names frac label info
+    set -g __pb_state $frac "$label" "$info"
+    test $__pb_on -eq 1; or return
+    set -l cols (tput cols 2>/dev/null; or echo 80)
+    set -l f (math "min(1, max(0, $frac))")
+    set -l pct (math "floor(100 * $f)")
+    set -l bw 40
+    set -l filled (math "round($bw * $f)")
+    # string join, NOT (cmd)(cmd): an empty substitution would blank the whole bar
+    set -l bar (string join '' (string repeat -n $filled '█') (string repeat -n (math "$bw - $filled") '░'))
+    set -l line (printf '%-10s %s %3d%%  %s' "$label" "$bar" $pct "$info")
+    set line (string sub -l (math "$cols - 1") -- "$line")
+    printf '\x1b7\x1b[%d;1H\x1b[2K%s\x1b8' $__pb_rows "$line"
+end
+
+function pb_stop
+    test $__pb_on -eq 1; or return
+    set -g __pb_on 0
+    printf '\x1b7\x1b[r\x1b8'                          # reset scroll region, keep cursor
+    printf '\x1b7\x1b[%d;1H\x1b[2K\x1b8' $__pb_rows    # wipe the bar row
+end
+
+function __pb_on_exit --on-event fish_exit
+    pb_stop
+end
+
+function __pb_on_int --on-signal INT
+    pb_stop
+    exit 130
+end
+
+function __pb_on_winch --on-signal WINCH
+    test $__pb_on -eq 1; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    printf '\x1b7\x1b[1;%dr\x1b8' (math $__pb_rows - 1)
+    pb_draw $__pb_state
+end
+# ──────────────────────────────────────────────────────────
+
+# Line-buffer zip/unzip output so lines appear live instead of in big chunks
+set unbuf
+command -q stdbuf; and set unbuf stdbuf -oL
+
+# prints one line of tool output; strips 7z's \r progress chatter, skips empties
+function show_line --argument-names line
+    set -l clean (string replace -r '.*\r' '' -- "$line")
+    test -n "$clean"; or return
+    printf '%s\n' "$clean"
+    pb_draw $cur_frac Extracting "$cur_info"
 end
 
 set password_file ~/.config/archive-passwords.txt
@@ -114,6 +170,16 @@ end
 set archives (printf '%s\n' $archives | sort -V)
 set total_archives (count $archives)
 
+set archive_sizes
+set total_bytes 0
+for a in $archives
+    set s (stat -c %s -- "$a" 2>/dev/null; or echo 0)
+    set -a archive_sizes $s
+    set total_bytes (math $total_bytes + $s)
+end
+test $total_bytes -gt 0; or set total_bytes 1
+set done_bytes 0
+
 echo "========================================"
 echo "ARCHIVE EXTRACTOR"
 echo "========================================"
@@ -121,6 +187,9 @@ echo "Archives:   $total_archives file(s)"
 echo "Encoding:   $zip_encoding"
 echo "Passwords:  "(count $stored_passwords)" stored"
 echo "========================================"
+
+pb_start
+pb_draw 0 Extracting "0/$total_archives"
 
 # -------------------------------------------------------------------
 # Extract archives
@@ -139,8 +208,11 @@ for archive in $archives
     set base (basename -- "$archive")
     set base (string replace -r '(?i)\.(zip|rar|7z)$' '' -- "$base")
 
-    printf "\r\033[K[%d/%d] Extracting: %s\n" $current_archive_num $total_archives "$archive"
-    progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
+    set arc_bytes $archive_sizes[$current_archive_num]
+    set -g cur_info "$current_archive_num/$total_archives  $base"
+    set -g cur_frac (math "$done_bytes / $total_bytes")
+    echo "[$current_archive_num/$total_archives] Extracting: $archive"
+    pb_draw $cur_frac Extracting "$cur_info"
 
     if set -q _flag_flatten
         set output_dir "$dir"
@@ -156,33 +228,32 @@ for archive in $archives
 
     # 1. Try unzip with specified encoding if it's a zip file
     if test -n "$is_zip"; and command -q unzip
-        unzip -O "$zip_encoding" -o -- "$archive" -d "$output_dir" 2>&1 | while read -l line
-            printf "\r\033[K%s\n" "$line"
-            progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
+        set -l entries (unzip -Z1 -- "$archive" 2>/dev/null | count)
+        set -l k 0
+        $unbuf unzip -O "$zip_encoding" -o -- "$archive" -d "$output_dir" 2>&1 | while read -l line
+            printf '%s\n' "$line"
+            if string match -qr '^\s*(inflating|extracting|creating|linking):' -- "$line"
+                set k (math $k + 1)
+            end
+            pb_draw (math "($done_bytes + $arc_bytes * min(1, $k / max(1, $entries))) / $total_bytes") Extracting "$cur_info"
         end
         set extract_status $pipestatus[1]
     end
 
     # 2. Try 7z without password if unzip failed or non-zip
     if test $extract_status -ne 0; and command -q 7z
-        7z x -y -- "$archive" "-o$output_dir" 2>&1 | while read -l line
-            printf "\r\033[K%s\n" "$line"
-            progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
-        end
+        $unbuf 7z x -y -- "$archive" "-o$output_dir" 2>&1 | while read -l line; show_line "$line"; end
         set extract_status $pipestatus[1]
     end
 
     # 3. Try stored passwords with 7z
     if test $extract_status -ne 0; and command -q 7z
         for password in $stored_passwords
-            printf "\r\033[KTrying stored password...\n"
-            7z x -y "-p$password" -- "$archive" "-o$output_dir" 2>&1 | while read -l line
-                printf "\r\033[K%s\n" "$line"
-                progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
-            end
+            printf "Trying stored password...\n"
+            $unbuf 7z x -y "-p$password" -- "$archive" "-o$output_dir" 2>&1 | while read -l line; show_line "$line"; end
             set extract_status $pipestatus[1]
             if test $extract_status -eq 0
-                printf "\r\033[KStored password matched.\n"
+                printf "Stored password matched.\n"
                 break
             end
         end
@@ -191,14 +262,11 @@ for archive in $archives
     # 4. Try session passwords
     if test $extract_status -ne 0; and command -q 7z
         for password in $session_passwords
-            printf "\r\033[KTrying previously entered password...\n"
-            7z x -y "-p$password" -- "$archive" "-o$output_dir" 2>&1 | while read -l line
-                printf "\r\033[K%s\n" "$line"
-                progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
-            end
+            printf "Trying previously entered password...\n"
+            $unbuf 7z x -y "-p$password" -- "$archive" "-o$output_dir" 2>&1 | while read -l line; show_line "$line"; end
             set extract_status $pipestatus[1]
             if test $extract_status -eq 0
-                printf "\r\033[KPreviously entered password matched.\n"
+                printf "Previously entered password matched.\n"
                 break
             end
         end
@@ -206,21 +274,18 @@ for archive in $archives
 
     # 5. Manual password entry
     if test $extract_status -ne 0; and command -q 7z
-        printf "\r\033[KStored passwords did not work.\n"
+        printf "Stored passwords did not work.\n"
         read -s -P "Enter password: " manual_password
         echo ""
-        7z x -y "-p$manual_password" -- "$archive" "-o$output_dir" 2>&1 | while read -l line
-            printf "\r\033[K%s\n" "$line"
-            progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
-        end
+        $unbuf 7z x -y "-p$manual_password" -- "$archive" "-o$output_dir" 2>&1 | while read -l line; show_line "$line"; end
         set extract_status $pipestatus[1]
         if test $extract_status -eq 0
-            printf "\r\033[KManual password worked.\n"
+            printf "Manual password worked.\n"
             if not contains -- "$manual_password" $session_passwords
                 set -a session_passwords "$manual_password"
             end
         else
-            printf "\r\033[KManual password failed.\n"
+            printf "Manual password failed.\n"
         end
     end
 
@@ -234,7 +299,7 @@ for archive in $archives
             set f_size (stat -c %s -- "$f" 2>/dev/null; or echo 0)
             set extr_size (math $extr_size + $f_size)
         end
-        printf "\r\033[KExtraction successful (%d files, %s MiB).\n" $extr_count (math -s 2 "$extr_size / 1048576")
+        printf "Extraction successful (%d files, %s MiB).\n" $extr_count (math -s 2 "$extr_size / 1048576")
         if not set -q _flag_keep
             set a_size (stat -c %s -- "$archive" 2>/dev/null; or echo 0)
             gio trash -- "$archive"
@@ -245,11 +310,13 @@ for archive in $archives
         end
     else
         set failed_count (math $failed_count + 1)
-        printf "\r\033[K\n"
-        printf "\r\033[KERROR: Failed to extract '%s'.\n" "$archive" >&2
-        printf "\r\033[KArchive was NOT trashed.\n" >&2
+        printf "\n"
+        printf "ERROR: Failed to extract '%s'.\n" "$archive" >&2
+        printf "Archive was NOT trashed.\n" >&2
     end
     
+    set done_bytes (math $done_bytes + $arc_bytes)
+    pb_draw (math "$done_bytes / $total_bytes") Extracting "$current_archive_num/$total_archives"
     set current_archive_num (math $current_archive_num + 1)
 end
 
@@ -259,7 +326,8 @@ set end_ns (date +%s%N)
 set total_seconds (math -s 2 "($end_ns - $start_ns) / 1000000000")
 set trashed_mb (math -s 2 "$trashed_size / 1048576")
 
-printf "\r\033[K"
+pb_draw 1 Extracting "$total_archives/$total_archives  done"
+pb_stop
 echo "========================================"
 echo "SUMMARY  "
 echo "========================================"

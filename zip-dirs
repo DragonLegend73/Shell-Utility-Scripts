@@ -44,18 +44,76 @@ if test (count $dirs) -eq 0
     exit 0
 end
 
-function progress_bar --argument-names current total label extra
-    set pct (math "floor(100 * $current / $total)")
-    set bar_w 30
-    set filled (math "round($bar_w * $current / $total)")
-    set empty (math "$bar_w - $filled")
-    set fill_str (string repeat -n (math "max(0, $filled)") '#')
-    set empty_str (string repeat -n (math "max(0, $empty)") '-')
-    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
-    test -n "$extra"; and printf "  %s" "$extra"
+# ───────────── pinned progress bar (bottom row) ─────────────
+set -g __pb_on 0
+set -g __pb_rows 0
+set -g __pb_state 0 "" ""
+
+function pb_start
+    isatty stdout; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    string match -qr '^\d+$' -- "$__pb_rows"; or return
+    test $__pb_rows -ge 5; or return
+    # newline (make room), save cursor, shrink scroll region, restore cursor, step back up
+    printf '\n\x1b7\x1b[1;%dr\x1b8\x1b[A' (math $__pb_rows - 1)
+    set -g __pb_on 1
 end
 
+# usage: pb_draw FRACTION(0..1) LABEL INFO
+function pb_draw --argument-names frac label info
+    set -g __pb_state $frac "$label" "$info"
+    test $__pb_on -eq 1; or return
+    set -l cols (tput cols 2>/dev/null; or echo 80)
+    set -l f (math "min(1, max(0, $frac))")
+    set -l pct (math "floor(100 * $f)")
+    set -l bw 40
+    set -l filled (math "round($bw * $f)")
+    # string join, NOT (cmd)(cmd): an empty substitution would blank the whole bar
+    set -l bar (string join '' (string repeat -n $filled '█') (string repeat -n (math "$bw - $filled") '░'))
+    set -l line (printf '%-10s %s %3d%%  %s' "$label" "$bar" $pct "$info")
+    set line (string sub -l (math "$cols - 1") -- "$line")
+    printf '\x1b7\x1b[%d;1H\x1b[2K%s\x1b8' $__pb_rows "$line"
+end
+
+function pb_stop
+    test $__pb_on -eq 1; or return
+    set -g __pb_on 0
+    printf '\x1b7\x1b[r\x1b8'                          # reset scroll region, keep cursor
+    printf '\x1b7\x1b[%d;1H\x1b[2K\x1b8' $__pb_rows    # wipe the bar row
+end
+
+function __pb_on_exit --on-event fish_exit
+    pb_stop
+end
+
+function __pb_on_int --on-signal INT
+    pb_stop
+    exit 130
+end
+
+function __pb_on_winch --on-signal WINCH
+    test $__pb_on -eq 1; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    printf '\x1b7\x1b[1;%dr\x1b8' (math $__pb_rows - 1)
+    pb_draw $__pb_state
+end
+# ──────────────────────────────────────────────────────────
+
+# Line-buffer zip/unzip output so lines appear live instead of in big chunks
+set unbuf
+command -q stdbuf; and set unbuf stdbuf -oL
+
 set total_dirs (count $dirs)
+
+# zip prints one "adding:" line per file AND per directory entry; find lists the same set
+set unit_counts
+set total_units 0
+for d in $dirs
+    set n (find "$d" | count)
+    set -a unit_counts $n
+    set total_units (math $total_units + $n)
+end
+set done_units 0
 set current_dir 0
 set success_zips 0
 set fail_zips 0
@@ -74,19 +132,26 @@ echo "Directories found: $total_dirs"
 echo "========================================"
 echo ""
 
+pb_start
+pb_draw 0 Zipping "0/$total_dirs"
+
 for d in $dirs
     set current_dir (math $current_dir + 1)
-    
-    printf "\r\033[K[%d/%d] Zipping directory: %s\n" $current_dir $total_dirs "$d"
-    progress_bar (math "$current_dir - 1") $total_dirs "Zipping" ""
+    set dir_units $unit_counts[$current_dir]
+    echo "[$current_dir/$total_dirs] Zipping directory: $d"
 
-    zip -r "$d.zip" "$d" 2>&1 | while read -l line
-        printf "\r\033[K%s\n" "$line"
-        progress_bar (math "$current_dir - 1") $total_dirs "Zipping" ""
+    set -l k 0
+    $unbuf zip -r "$d.zip" "$d" 2>&1 | while read -l line
+        printf '%s\n' "$line"
+        set k (math $k + 1)
+        pb_draw (math "($done_units + $k) / $total_units") Zipping "$current_dir/$total_dirs  $d"
     end
-    
-    if test $pipestatus[1] -ne 0
-        printf "\r\033[KError: Failed to zip '%s'. Directory was NOT trashed.\n" "$d" >&2
+    set zip_status $pipestatus[1]      # must be the very next line after `end`
+    set done_units (math $done_units + $dir_units)
+    pb_draw (math "$done_units / $total_units") Zipping "$current_dir/$total_dirs  $d"
+
+    if test $zip_status -ne 0
+        printf "Error: Failed to zip '%s'. Directory was NOT trashed.\n" "$d" >&2
         set fail_zips (math $fail_zips + 1)
         continue
     end
@@ -101,17 +166,17 @@ for d in $dirs
         if gio trash -- "$d" >/dev/null 2>&1
             set trashed_count (math $trashed_count + 1)
             set trashed_size (math $trashed_size + $item_size)
-            printf "\r\033[KDone: %s.zip (%s MiB) - Trashed 1 item\n" "$d" "$z_size_mb"
+            printf "Done: %s.zip (%s MiB) - Trashed 1 item\n" "$d" "$z_size_mb"
         else if rm -rf -- "$d" >/dev/null 2>&1
             set removed_count (math $removed_count + 1)
             set trashed_size (math $trashed_size + $item_size)
-            printf "\r\033[KDone: %s.zip (%s MiB) - Removed 1 item\n" "$d" "$z_size_mb"
+            printf "Done: %s.zip (%s MiB) - Removed 1 item\n" "$d" "$z_size_mb"
         else
-            printf "\r\033[KDone: %s.zip (%s MiB) - Failed to trash/remove item\n" "$d" "$z_size_mb"
+            printf "Done: %s.zip (%s MiB) - Failed to trash/remove item\n" "$d" "$z_size_mb"
         end
     else
         set kept_count (math $kept_count + 1)
-        printf "\r\033[KDone: %s.zip (%s MiB) - Kept 1 item\n" "$d" "$z_size_mb"
+        printf "Done: %s.zip (%s MiB) - Kept 1 item\n" "$d" "$z_size_mb"
     end
 end
 
@@ -120,8 +185,8 @@ set elapsed_secs (math -s2 "($end_time - $start_time) / 1000000000")
 set total_zip_size_mb (math -s2 "$total_zip_size / 1048576")
 set trashed_size_mb (math -s2 "$trashed_size / 1048576")
 
-progress_bar $total_dirs $total_dirs "Zipping" "Completed"
-printf "\r\033[K"
+pb_draw 1 Zipping "$total_dirs/$total_dirs  done"
+pb_stop
 echo "========================================"
 echo "SUMMARY"
 echo "========================================"
