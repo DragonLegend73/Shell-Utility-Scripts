@@ -142,15 +142,15 @@ def save_cache(cache):
 
 
 def contains_cjk(text):
-    return bool(re.search(r'[가-힣぀-ヿ㐀-䶿一-鿿]', text))
+    return bool(re.search(r"[가-힣぀-ヿ㐀-䶿一-鿿]", text))
 
 
 def parse_zip_name(filename):
     """Parse '{id}_{name}.zip' -> (id, name) or None."""
-    if not filename.lower().endswith('.zip'):
+    if not filename.lower().endswith(".zip"):
         return None
     stem = filename[:-4].strip()
-    m = re.match(r'^(\d+)_(.+)$', stem)
+    m = re.match(r"^(\d+)_(.+)$", stem)
     if m:
         return m.group(1), m.group(2).strip()
     return None
@@ -172,7 +172,7 @@ def parse_json_response(text):
     except json.JSONDecodeError:
         pass
 
-    m = re.search(r'(\{.*\})', text, re.DOTALL)
+    m = re.search(r"(\{.*\})", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1))
@@ -180,7 +180,7 @@ def parse_json_response(text):
             pass
 
     # Clean trailing commas before closing braces/brackets
-    cleaned = re.sub(r',(\s*[\}\]])', r'\1', text)
+    cleaned = re.sub(r",(\s*[\}\]])", r"\1", text)
     return json.loads(cleaned)
 
 
@@ -298,7 +298,9 @@ Return a JSON object mapping each original name to its English translation, like
                 raise
             if e.code == 429:
                 wait = [30, 60, 90, 120][min(attempt, 3)]
-                print(f"   ⚠ 429 rate limited, sleeping {wait}s (attempt {attempt+1})...")
+                print(
+                    f"   ⚠ 429 rate limited, sleeping {wait}s (attempt {attempt+1})..."
+                )
                 bar.sleep(wait, "429 rate limited")
             elif e.code in (500, 503):
                 print(f"   ⚠ {e.code} server busy, retrying (attempt {attempt+1})...")
@@ -314,13 +316,13 @@ Return a JSON object mapping each original name to its English translation, like
 
 def clean_filename(name):
     """Sanitize translated name for the filesystem."""
-    name = name.replace('（', ' (').replace('）', ') ')
-    name = re.sub(r'[\/:*?"<>|]', '', name)
-    name = re.sub(r'\s*\(\s*', ' (', name)
-    name = re.sub(r'\s*\)\s*', ') ', name)
-    name = re.sub(r'_\s+', '_', name)
-    name = re.sub(r'\s+_', '_', name)
-    name = re.sub(r'\s+', ' ', name).strip()
+    name = name.replace("（", " (").replace("）", ") ")
+    name = re.sub(r'[\/:*?"<>|]', "", name)
+    name = re.sub(r"\s*\(\s*", " (", name)
+    name = re.sub(r"\s*\)\s*", ") ", name)
+    name = re.sub(r"_\s+", "_", name)
+    name = re.sub(r"\s+_", "_", name)
+    name = re.sub(r"\s+", " ", name).strip()
     return name
 
 
@@ -329,10 +331,19 @@ def main():
     parser = argparse.ArgumentParser(
         description="Translate Chinese/Japanese/Korean CJK zip file names to English using Gemini AI."
     )
-    parser.add_argument("paths", nargs="*", default=["."], help="Directories to process")
-    parser.add_argument("-n", "--dry-run", action="store_true", help="Preview without renaming")
-    parser.add_argument("-r", "--recursive", action="store_true", help="Process subdirectories")
-    parser.add_argument("--api-key", help="Gemini API key (or set GEMINI_API_KEY env var / ~/.config/gemini-api-key)")
+    parser.add_argument(
+        "paths", nargs="*", default=["."], help="Directories to process"
+    )
+    parser.add_argument(
+        "-n", "--dry-run", action="store_true", help="Preview without renaming"
+    )
+    parser.add_argument(
+        "-r", "--recursive", action="store_true", help="Process subdirectories"
+    )
+    parser.add_argument(
+        "--api-key",
+        help="Gemini API key (or set GEMINI_API_KEY env var / ~/.config/gemini-api-key)",
+    )
     args = parser.parse_args()
 
     api_key = get_api_key(args.api_key)
@@ -347,7 +358,7 @@ def main():
 
         if args.recursive:
             for root, dirs, files in os.walk(p):
-                if '.git' in root or 'avif-benchmark-' in root:
+                if ".git" in root or "avif-benchmark-" in root:
                     continue
                 for f in files:
                     parsed = parse_zip_name(f)
@@ -365,7 +376,9 @@ def main():
 
     # ── Deduplicate names and batch-translate ─────────────────────────────
     unique_names = sorted(set(t[2] for t in targets))
-    print(f"Found {len(targets)} zip file(s) with {len(unique_names)} unique CJK name(s).\n")
+    print(
+        f"Found {len(targets)} zip file(s) with {len(unique_names)} unique CJK name(s).\n"
+    )
 
     cache = load_cache()
     translations = {}
@@ -383,13 +396,16 @@ def main():
 
     cache_hits = len(translations)
     total_batches = (len(uncached) + BATCH_SIZE - 1) // BATCH_SIZE
-    total_units = total_batches + 1          # +1 = the renaming phase
+    total_units = total_batches + 1  # +1 = the renaming phase
     bar.start()
     bar.draw(0, "Translating", f"0/{total_batches} batches  cache: {cache_hits}")
 
     if uncached:
         if not api_key:
-            print("Error: Gemini API Key not found. Pass --api-key, export GEMINI_API_KEY=..., or save to ~/.config/gemini-api-key", file=sys.stderr)
+            print(
+                "Error: Gemini API Key not found. Pass --api-key, export GEMINI_API_KEY=..., or save to ~/.config/gemini-api-key",
+                file=sys.stderr,
+            )
             sys.exit(1)
         for i in range(0, len(uncached), BATCH_SIZE):
             batch = uncached[i : i + BATCH_SIZE]
@@ -403,7 +419,9 @@ def main():
                 save_cache(cache)
                 print(f"   ✓ Got {len(result)} translation(s)\n")
             except Exception as e:
-                print(f"   ⚠ Batch error ({e}), falling back to item-by-item Gemini API calls...")
+                print(
+                    f"   ⚠ Batch error ({e}), falling back to item-by-item Gemini API calls..."
+                )
                 fallback_success = 0
                 for single_name in batch:
                     try:
@@ -413,15 +431,19 @@ def main():
                             cache.update(res)
                             fallback_success += 1
                         else:
-                            print(f"   ↳ Skipping '{single_name}' (API response missing key)")
+                            print(
+                                f"   ↳ Skipping '{single_name}' (API response missing key)"
+                            )
                     except Exception as single_err:
                         print(f"   ↳ Skipping '{single_name}' ({single_err})")
                 save_cache(cache)
-                print(f"   ✓ Translated {fallback_success}/{len(batch)} item(s) via individual API calls\n")
+                print(
+                    f"   ✓ Translated {fallback_success}/{len(batch)} item(s) via individual API calls\n"
+                )
 
             bar.draw(batch_num / total_units, "Translating", info)
             if batch_num < total_batches:
-                bar.sleep(10, "rate-limit pause")   # respect free-tier rate limits
+                bar.sleep(10, "rate-limit pause")  # respect free-tier rate limits
 
     # ── Apply renames ─────────────────────────────────────────────────────
     renamed = 0
@@ -429,14 +451,21 @@ def main():
     skipped_details = []
     total_files = len(targets)
 
-    for idx, (full_path, file_id, cjk_name) in enumerate(sorted(targets, key=lambda t: t[1])):
-        bar.draw((total_batches + idx / max(1, total_files)) / total_units,
-                 "Renaming", f"{idx}/{total_files}  {skipped} skipped")
+    for idx, (full_path, file_id, cjk_name) in enumerate(
+        sorted(targets, key=lambda t: t[1])
+    ):
+        bar.draw(
+            (total_batches + idx / max(1, total_files)) / total_units,
+            "Renaming",
+            f"{idx}/{total_files}  {skipped} skipped",
+        )
         old_basename = os.path.basename(full_path)
         eng = translations.get(cjk_name)
 
         if not eng or contains_cjk(eng):
-            reason = "no translation available" if not eng else "translation contains CJK"
+            reason = (
+                "no translation available" if not eng else "translation contains CJK"
+            )
             skipped_details.append(f"  {old_basename} — {reason}")
             skipped += 1
             continue
@@ -448,7 +477,11 @@ def main():
         if half > 10:
             first_half = eng[:half].strip().lower()
             second_half = eng[half:].strip().lower()
-            if first_half and second_half and (first_half in second_half or second_half in first_half):
+            if (
+                first_half
+                and second_half
+                and (first_half in second_half or second_half in first_half)
+            ):
                 eng = eng[:half].strip()
 
         new_basename = f"{file_id}_{eng}.zip"

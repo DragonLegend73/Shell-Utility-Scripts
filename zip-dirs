@@ -10,7 +10,7 @@ function show_help
     echo "  -h, --help    show this help and exit"
 end
 
-argparse 'h/help' 'k/keep' -- $argv
+argparse h/help k/keep -- $argv
 or exit 1
 
 if set -q _flag_help
@@ -70,16 +70,16 @@ function pb_draw --argument-names frac label info
     set -l filled (math "round($bw * $f)")
     # string join, NOT (cmd)(cmd): an empty substitution would blank the whole bar
     set -l bar (string join '' (string repeat -n $filled '█') (string repeat -n (math "$bw - $filled") '░'))
-    set -l line (printf '%-10s %s %3d%%  %s' "$label" "$bar" $pct "$info")
-    set line (string sub -l (math "$cols - 1") -- "$line")
+    set -l line (printf '%-11s %s %3d%%  %s' "$label" "$bar" $pct "$info")
+    set line (string shorten -m (math "$cols - 1") -- "$line")
     printf '\x1b7\x1b[%d;1H\x1b[2K%s\x1b8' $__pb_rows "$line"
 end
 
 function pb_stop
     test $__pb_on -eq 1; or return
     set -g __pb_on 0
-    printf '\x1b7\x1b[r\x1b8'                          # reset scroll region, keep cursor
-    printf '\x1b7\x1b[%d;1H\x1b[2K\x1b8' $__pb_rows    # wipe the bar row
+    printf '\x1b7\x1b[r\x1b8' # reset scroll region, keep cursor
+    printf '\x1b7\x1b[%d;1H\x1b[2K\x1b8' $__pb_rows # wipe the bar row
 end
 
 function __pb_on_exit --on-event fish_exit
@@ -126,7 +126,7 @@ set kept_count 0
 set start_time (date +%s%N)
 
 echo "========================================"
-echo "ZIP-DIRS"
+echo ZIP-DIRS
 echo "========================================"
 echo "Directories found: $total_dirs"
 echo "========================================"
@@ -146,7 +146,7 @@ for d in $dirs
         set k (math $k + 1)
         pb_draw (math "($done_units + $k) / $total_units") Zipping "$current_dir/$total_dirs  $d"
     end
-    set zip_status $pipestatus[1]      # must be the very next line after `end`
+    set zip_status $pipestatus[1] # must be the very next line after `end`
     set done_units (math $done_units + $dir_units)
     pb_draw (math "$done_units / $total_units") Zipping "$current_dir/$total_dirs  $d"
 
@@ -188,7 +188,7 @@ set trashed_size_mb (math -s2 "$trashed_size / 1048576")
 pb_draw 1 Zipping "$total_dirs/$total_dirs  done"
 pb_stop
 echo "========================================"
-echo "SUMMARY"
+echo SUMMARY
 echo "========================================"
 echo "Zips created:        $success_zips"
 echo "Failed:              $fail_zips"

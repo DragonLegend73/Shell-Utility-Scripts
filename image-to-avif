@@ -60,8 +60,8 @@ function pb_draw --argument-names frac label info
     set -l bw 40
     set -l filled (math "round($bw * $f)")
     set -l bar (string join '' (string repeat -n $filled '█') (string repeat -n (math "$bw - $filled") '░'))
-    set -l line (printf '%-11s %s %3d%%  %s' "$label" "$bar" $pct "$info")      # CHANGED: %-10s -> %-11s ("Compressing" is 11 chars)
-    set line (string shorten -m (math "$cols - 1") -- "$line")                  # CHANGED: was `string sub -l`; shorten is width-aware, so CJK file names (2 cells each) can't overflow the row
+    set -l line (printf '%-11s %s %3d%%  %s' "$label" "$bar" $pct "$info") # CHANGED: %-10s -> %-11s ("Compressing" is 11 chars)
+    set line (string shorten -m (math "$cols - 1") -- "$line") # CHANGED: was `string sub -l`; shorten is width-aware, so CJK file names (2 cells each) can't overflow the row
     printf '\x1b7\x1b[%d;1H\x1b[2K%s\x1b8' $__pb_rows "$line"
 end
 
@@ -92,10 +92,10 @@ end
 argparse \
     'q/quality=' \
     's/speed=' \
-    'l/lossless' \
-    'r/recursive' \
-    'k/keep' \
-    'h/help' \
+    l/lossless \
+    r/recursive \
+    k/keep \
+    h/help \
     -- $argv
 or exit 1
 
@@ -276,7 +276,7 @@ pb_draw 1 Converting "$total/$total  done"
 pb_stop
 echo ""
 echo "========================================"
-echo "SUMMARY"
+echo SUMMARY
 echo "========================================"
 
 # Helper values
