@@ -77,14 +77,16 @@ echo ""
 for d in $dirs
     set current_dir (math $current_dir + 1)
     
+    printf "\r\033[K[%d/%d] Zipping directory: %s\n" $current_dir $total_dirs "$d"
     progress_bar (math "$current_dir - 1") $total_dirs "Zipping" ""
-    echo ""
-    echo "[$current_dir/$total_dirs] Zipping directory: $d"
 
-    zip -r "$d.zip" "$d"
+    zip -r "$d.zip" "$d" 2>&1 | while read -l line
+        printf "\r\033[K%s\n" "$line"
+        progress_bar (math "$current_dir - 1") $total_dirs "Zipping" ""
+    end
     
-    if test $status -ne 0
-        echo "Error: Failed to zip '$d'. Directory was NOT trashed." >&2
+    if test $pipestatus[1] -ne 0
+        printf "\r\033[KError: Failed to zip '%s'. Directory was NOT trashed.\n" "$d" >&2
         set fail_zips (math $fail_zips + 1)
         continue
     end
@@ -99,17 +101,17 @@ for d in $dirs
         if gio trash -- "$d" >/dev/null 2>&1
             set trashed_count (math $trashed_count + 1)
             set trashed_size (math $trashed_size + $item_size)
-            echo "Done: $d.zip ($z_size_mb MiB) - Trashed 1 item"
+            printf "\r\033[KDone: %s.zip (%s MiB) - Trashed 1 item\n" "$d" "$z_size_mb"
         else if rm -rf -- "$d" >/dev/null 2>&1
             set removed_count (math $removed_count + 1)
             set trashed_size (math $trashed_size + $item_size)
-            echo "Done: $d.zip ($z_size_mb MiB) - Removed 1 item"
+            printf "\r\033[KDone: %s.zip (%s MiB) - Removed 1 item\n" "$d" "$z_size_mb"
         else
-            echo "Done: $d.zip ($z_size_mb MiB) - Failed to trash/remove item"
+            printf "\r\033[KDone: %s.zip (%s MiB) - Failed to trash/remove item\n" "$d" "$z_size_mb"
         end
     else
         set kept_count (math $kept_count + 1)
-        echo "Done: $d.zip ($z_size_mb MiB) - Kept 1 item"
+        printf "\r\033[KDone: %s.zip (%s MiB) - Kept 1 item\n" "$d" "$z_size_mb"
     end
 end
 

@@ -139,9 +139,8 @@ for archive in $archives
     set base (basename -- "$archive")
     set base (string replace -r '(?i)\.(zip|rar|7z)$' '' -- "$base")
 
-    progress_bar $current_archive_num $total_archives "Extracting" ""
-    echo ""
-    echo "[$current_archive_num/$total_archives] Extracting: $archive"
+    printf "\r\033[K[%d/%d] Extracting: %s\n" $current_archive_num $total_archives "$archive"
+    progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
 
     if set -q _flag_flatten
         set output_dir "$dir"
@@ -157,24 +156,33 @@ for archive in $archives
 
     # 1. Try unzip with specified encoding if it's a zip file
     if test -n "$is_zip"; and command -q unzip
-        unzip -O "$zip_encoding" -q -o -- "$archive" -d "$output_dir" >/dev/null 2>&1
-        set extract_status $status
+        unzip -O "$zip_encoding" -o -- "$archive" -d "$output_dir" 2>&1 | while read -l line
+            printf "\r\033[K%s\n" "$line"
+            progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
+        end
+        set extract_status $pipestatus[1]
     end
 
     # 2. Try 7z without password if unzip failed or non-zip
     if test $extract_status -ne 0; and command -q 7z
-        7z x -bsp1 -y -- "$archive" "-o$output_dir"
-        set extract_status $status
+        7z x -y -- "$archive" "-o$output_dir" 2>&1 | while read -l line
+            printf "\r\033[K%s\n" "$line"
+            progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
+        end
+        set extract_status $pipestatus[1]
     end
 
     # 3. Try stored passwords with 7z
     if test $extract_status -ne 0; and command -q 7z
         for password in $stored_passwords
-            echo "Trying stored password..."
-            7z x -bsp1 -y "-p$password" -- "$archive" "-o$output_dir"
-            set extract_status $status
+            printf "\r\033[KTrying stored password...\n"
+            7z x -y "-p$password" -- "$archive" "-o$output_dir" 2>&1 | while read -l line
+                printf "\r\033[K%s\n" "$line"
+                progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
+            end
+            set extract_status $pipestatus[1]
             if test $extract_status -eq 0
-                echo "Stored password matched."
+                printf "\r\033[KStored password matched.\n"
                 break
             end
         end
@@ -183,11 +191,14 @@ for archive in $archives
     # 4. Try session passwords
     if test $extract_status -ne 0; and command -q 7z
         for password in $session_passwords
-            echo "Trying previously entered password..."
-            7z x -bsp1 -y "-p$password" -- "$archive" "-o$output_dir"
-            set extract_status $status
+            printf "\r\033[KTrying previously entered password...\n"
+            7z x -y "-p$password" -- "$archive" "-o$output_dir" 2>&1 | while read -l line
+                printf "\r\033[K%s\n" "$line"
+                progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
+            end
+            set extract_status $pipestatus[1]
             if test $extract_status -eq 0
-                echo "Previously entered password matched."
+                printf "\r\033[KPreviously entered password matched.\n"
                 break
             end
         end
@@ -195,18 +206,21 @@ for archive in $archives
 
     # 5. Manual password entry
     if test $extract_status -ne 0; and command -q 7z
-        echo "Stored passwords did not work."
+        printf "\r\033[KStored passwords did not work.\n"
         read -s -P "Enter password: " manual_password
         echo ""
-        7z x -bsp1 -y "-p$manual_password" -- "$archive" "-o$output_dir"
-        set extract_status $status
+        7z x -y "-p$manual_password" -- "$archive" "-o$output_dir" 2>&1 | while read -l line
+            printf "\r\033[K%s\n" "$line"
+            progress_bar (math "$current_archive_num - 1") $total_archives "Extracting" ""
+        end
+        set extract_status $pipestatus[1]
         if test $extract_status -eq 0
-            echo "Manual password worked."
+            printf "\r\033[KManual password worked.\n"
             if not contains -- "$manual_password" $session_passwords
                 set -a session_passwords "$manual_password"
             end
         else
-            echo "Manual password failed."
+            printf "\r\033[KManual password failed.\n"
         end
     end
 
@@ -220,7 +234,7 @@ for archive in $archives
             set f_size (stat -c %s -- "$f" 2>/dev/null; or echo 0)
             set extr_size (math $extr_size + $f_size)
         end
-        echo "Extraction successful ($extr_count files, "(math -s 2 "$extr_size / 1048576")" MiB)."
+        printf "\r\033[KExtraction successful (%d files, %s MiB).\n" $extr_count (math -s 2 "$extr_size / 1048576")
         if not set -q _flag_keep
             set a_size (stat -c %s -- "$archive" 2>/dev/null; or echo 0)
             gio trash -- "$archive"
@@ -231,9 +245,9 @@ for archive in $archives
         end
     else
         set failed_count (math $failed_count + 1)
-        echo ""
-        echo "ERROR: Failed to extract '$archive'." >&2
-        echo "Archive was NOT trashed." >&2
+        printf "\r\033[K\n"
+        printf "\r\033[KERROR: Failed to extract '%s'.\n" "$archive" >&2
+        printf "\r\033[KArchive was NOT trashed.\n" >&2
     end
     
     set current_archive_num (math $current_archive_num + 1)
