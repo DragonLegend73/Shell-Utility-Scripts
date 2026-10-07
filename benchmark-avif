@@ -24,16 +24,62 @@ test $encoder_threads -lt 1; and set encoder_threads 1
 set metric_jobs 3
 set quality_list 30 40 50 60
 
-function progress_bar --argument-names current total label extra
-    set pct (math "floor(100 * $current / $total)")
-    set bar_w 30
-    set filled (math "round($bar_w * $current / $total)")
-    set empty (math "$bar_w - $filled")
-    set fill_str (string repeat -n (math "max(0, $filled)") '#')
-    set empty_str (string repeat -n (math "max(0, $empty)") '-')
-    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
-    test -n "$extra"; and printf "  %s" "$extra"
+# ───────────── pinned progress bar (bottom row) ─────────────
+set -g __pb_on 0
+set -g __pb_rows 0
+set -g __pb_state 0 "" ""
+
+function pb_start
+    isatty stdout; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    string match -qr '^\d+$' -- "$__pb_rows"; or return
+    test $__pb_rows -ge 5; or return
+    printf '\n\x1b7\x1b[1;%dr\x1b8\x1b[A' (math $__pb_rows - 1)
+    set -g __pb_on 1
 end
+
+# usage: pb_draw FRACTION(0..1) LABEL INFO
+function pb_draw --argument-names frac label info
+    set -g __pb_state $frac "$label" "$info"
+    test $__pb_on -eq 1; or return
+    set -l cols (tput cols 2>/dev/null; or echo 80)
+    set -l f (math "min(1, max(0, $frac))")
+    set -l pct (math "floor(100 * $f)")
+    set -l bw 40
+    set -l filled (math "round($bw * $f)")
+    set -l bar (string join '' (string repeat -n $filled '█') (string repeat -n (math "$bw - $filled") '░'))
+    set -l line (printf '%-11s %s %3d%%  %s' "$label" "$bar" $pct "$info")      # CHANGED: %-10s -> %-11s ("Compressing" is 11 chars)
+    set line (string shorten -m (math "$cols - 1") -- "$line")                  # CHANGED: was `string sub -l`; shorten is width-aware, so CJK file names (2 cells each) can't overflow the row
+    printf '\x1b7\x1b[%d;1H\x1b[2K%s\x1b8' $__pb_rows "$line"
+end
+
+function pb_stop
+    test $__pb_on -eq 1; or return
+    set -g __pb_on 0
+    printf '\x1b7\x1b[r\x1b8'
+    printf '\x1b7\x1b[%d;1H\x1b[2K\x1b8' $__pb_rows
+end
+
+function __pb_on_exit --on-event fish_exit
+    pb_stop
+end
+
+function __pb_on_int --on-signal INT
+    pb_stop
+    exit 130
+end
+
+function __pb_on_winch --on-signal WINCH
+    test $__pb_on -eq 1; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    printf '\x1b7\x1b[1;%dr\x1b8' (math $__pb_rows - 1)
+    pb_draw $__pb_state
+end
+# ──────────────────────────────────────────────────────────
+
+# share of the overall bar per phase (must add up to 1.0)
+set w_encode 0.6
+set w_metrics 0.4
 
 function show_help
     echo "Usage: benchmark-avif [-s N] [-n N] [-t N] [-j N] [-h]"
@@ -241,6 +287,8 @@ echo "════════════════════════�
 # Track encode times per quality level
 set total_combos (math (count $quality_list) " * $sample_count")
 set combo_num 0
+pb_start
+pb_draw 0 Encoding "0/$total_combos"
 
 for quality in $quality_list
     set quality_dir "$outdir/q$quality"
@@ -258,6 +306,7 @@ for quality in $quality_list
         set stem (string replace -r '(?i)\.(jpe?g|png)$' '' -- "$filename")
         set output "$quality_dir/"(printf "%03d_%s.avif" $image_number "$stem")
 
+        pb_draw (math "$w_encode * ($combo_num - 1) / $total_combos") Encoding "$combo_num/$total_combos  q$quality  $filename"
         set file_start_ns (date +%s%N)
         avifenc -q $quality -s $speed -j $encoder_threads "$f" "$output" >/dev/null 2>&1
         set encode_status $status
@@ -265,16 +314,17 @@ for quality in $quality_list
         set elapsed (math "($file_end_ns - $file_start_ns) / 1000000000")
 
         if test $encode_status -ne 0; or not test -f "$output"
-            printf "\r\033[K  [%d/%d] FAILED: q%s %s\n" $combo_num $total_combos "$quality" "$filename"
+            printf "  [%d/%d] FAILED: q%s %s\n" $combo_num $total_combos "$quality" "$filename"
             echo "FAIL $elapsed" >> "$encode_times_file"
         else
             echo "$elapsed" >> "$encode_times_file"
+            printf "  [%d/%d] q%s  %s  %.2fs\n" $combo_num $total_combos "$quality" "$filename" $elapsed
         end
 
-        progress_bar $combo_num $total_combos "Encoding" "q$quality"
+        pb_draw (math "$w_encode * $combo_num / $total_combos") Encoding "$combo_num/$total_combos  q$quality  $filename"
     end
 end
-printf "\r\033[K"
+
 echo "  Encoding complete."
 echo ""
 
@@ -330,17 +380,17 @@ parallel --colsep '\t' -j $metric_jobs \
     < "$job_list" 2>/dev/null &
 set parallel_pid $last_pid
 
-# Poll for completion
+set metric_total (math "max(1, $total_metric_jobs)")
+
 while kill -0 $parallel_pid 2>/dev/null
     set completed (count (path filter -f $tmpdir/metric_q*_*.txt 2>/dev/null))
-    progress_bar $completed $total_metric_jobs "Metrics" "$metric_jobs workers"
+    pb_draw (math "$w_encode + $w_metrics * min($completed, $metric_total) / $metric_total") Metrics "$completed/$total_metric_jobs  $metric_jobs workers"
     sleep 0.5
 end
 wait $parallel_pid
 
-# Final update
-progress_bar $total_metric_jobs $total_metric_jobs "Metrics" "$metric_jobs workers"
-printf "\r\033[K"
+pb_draw 1 Metrics "$total_metric_jobs/$total_metric_jobs  done"
+pb_stop
 echo "  Metrics complete."
 echo ""
 

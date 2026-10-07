@@ -36,16 +36,58 @@ function show_help
     echo "  -h, --help            Show this help and exit"
 end
 
-function progress_bar --argument-names current total label extra
-    set pct (math "floor(100 * $current / $total)")
-    set bar_w 30
-    set filled (math "round($bar_w * $current / $total)")
-    set empty (math "$bar_w - $filled")
-    set fill_str (string repeat -n (math "max(0, $filled)") '#')
-    set empty_str (string repeat -n (math "max(0, $empty)") '-')
-    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
-    test -n "$extra"; and printf "  %s" "$extra"
+# ───────────── pinned progress bar (bottom row) ─────────────
+set -g __pb_on 0
+set -g __pb_rows 0
+set -g __pb_state 0 "" ""
+
+function pb_start
+    isatty stdout; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    string match -qr '^\d+$' -- "$__pb_rows"; or return
+    test $__pb_rows -ge 5; or return
+    printf '\n\x1b7\x1b[1;%dr\x1b8\x1b[A' (math $__pb_rows - 1)
+    set -g __pb_on 1
 end
+
+# usage: pb_draw FRACTION(0..1) LABEL INFO
+function pb_draw --argument-names frac label info
+    set -g __pb_state $frac "$label" "$info"
+    test $__pb_on -eq 1; or return
+    set -l cols (tput cols 2>/dev/null; or echo 80)
+    set -l f (math "min(1, max(0, $frac))")
+    set -l pct (math "floor(100 * $f)")
+    set -l bw 40
+    set -l filled (math "round($bw * $f)")
+    set -l bar (string join '' (string repeat -n $filled '█') (string repeat -n (math "$bw - $filled") '░'))
+    set -l line (printf '%-11s %s %3d%%  %s' "$label" "$bar" $pct "$info")      # CHANGED: %-10s -> %-11s ("Compressing" is 11 chars)
+    set line (string shorten -m (math "$cols - 1") -- "$line")                  # CHANGED: was `string sub -l`; shorten is width-aware, so CJK file names (2 cells each) can't overflow the row
+    printf '\x1b7\x1b[%d;1H\x1b[2K%s\x1b8' $__pb_rows "$line"
+end
+
+function pb_stop
+    test $__pb_on -eq 1; or return
+    set -g __pb_on 0
+    printf '\x1b7\x1b[r\x1b8'
+    printf '\x1b7\x1b[%d;1H\x1b[2K\x1b8' $__pb_rows
+end
+
+function __pb_on_exit --on-event fish_exit
+    pb_stop
+end
+
+function __pb_on_int --on-signal INT
+    pb_stop
+    exit 130
+end
+
+function __pb_on_winch --on-signal WINCH
+    test $__pb_on -eq 1; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    printf '\x1b7\x1b[1;%dr\x1b8' (math $__pb_rows - 1)
+    pb_draw $__pb_state
+end
+# ──────────────────────────────────────────────────────────
 
 argparse \
     'q/quality=' \
@@ -123,6 +165,12 @@ end
 set files (printf '%s\n' $files | sort -V)
 
 set total (count $files)
+set total_bytes 0
+for f in $files
+    set total_bytes (math $total_bytes + (stat -c %s -- "$f"))
+end
+test $total_bytes -gt 0; or set total_bytes 1
+set done_bytes 0
 set processed 0
 set failed 0
 
@@ -151,6 +199,9 @@ echo "Speed:     $speed"
 echo "========================================"
 echo ""
 
+pb_start
+pb_draw 0 Converting "0/$total"
+
 for f in $files
     set processed (math $processed + 1)
 
@@ -158,6 +209,7 @@ for f in $files
 
     set source_size (stat -c %s -- "$f")
     set total_source_bytes (math $total_source_bytes + $source_size)
+    pb_draw (math "$done_bytes / $total_bytes") Converting "$processed/$total  $f"
 
     # Per-file timer
     set file_start_ns (date +%s%N)
@@ -188,6 +240,10 @@ for f in $files
     if test $encode_status -eq 0; and test -f "$out"
         set output_size (stat -c %s -- "$out")
         set total_output_bytes (math $total_output_bytes + $output_size)
+        printf '[%d/%d] %s  %.2f -> %.2f MiB (%.1f%% saved, %.1fs)\n' \
+            $processed $total "$f" \
+            (math "$source_size / 1048576") (math "$output_size / 1048576") \
+            (math "100 * (1 - $output_size / max(1, $source_size))") $file_elapsed
 
         if not set -q _flag_keep
             gio trash -- "$f" >/dev/null 2>&1
@@ -202,14 +258,13 @@ for f in $files
         end
     else
         set failed (math $failed + 1)
-
-        echo ""
-        echo "Error: failed to encode '$f'"
+        echo "[$processed/$total] ERROR: failed to encode '$f'" >&2
     end
 
+    set done_bytes (math $done_bytes + $source_size)
     set running_saved_bytes (math "$total_source_bytes - $total_output_bytes")
     set running_saved_mib (printf "%.1f" (math "$running_saved_bytes / 1048576"))
-    progress_bar $processed $total "Converting" "$running_saved_mib MiB saved"
+    pb_draw (math "$done_bytes / $total_bytes") Converting "$processed/$total  $running_saved_mib MiB saved"
 end
 
 set end_ns (date +%s%N)
@@ -217,7 +272,8 @@ set total_seconds (math "($end_ns - $start_ns) / 1000000000")
 
 set successful (math $total - $failed)
 
-printf "\r\033[K"
+pb_draw 1 Converting "$total/$total  done"
+pb_stop
 echo ""
 echo "========================================"
 echo "SUMMARY"

@@ -5,16 +5,58 @@
 #
 # Requirements: poppler (pdfimages), stat, sort.
 
-function progress_bar --argument-names current total label extra
-    set pct (math "floor(100 * $current / $total)")
-    set bar_w 30
-    set filled (math "round($bar_w * $current / $total)")
-    set empty (math "$bar_w - $filled")
-    set fill_str (string repeat -n (math "max(0, $filled)") '#')
-    set empty_str (string repeat -n (math "max(0, $empty)") '-')
-    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
-    test -n "$extra"; and printf "  %s" "$extra"
+# ───────────── pinned progress bar (bottom row) ─────────────
+set -g __pb_on 0
+set -g __pb_rows 0
+set -g __pb_state 0 "" ""
+
+function pb_start
+    isatty stdout; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    string match -qr '^\d+$' -- "$__pb_rows"; or return
+    test $__pb_rows -ge 5; or return
+    printf '\n\x1b7\x1b[1;%dr\x1b8\x1b[A' (math $__pb_rows - 1)
+    set -g __pb_on 1
 end
+
+# usage: pb_draw FRACTION(0..1) LABEL INFO
+function pb_draw --argument-names frac label info
+    set -g __pb_state $frac "$label" "$info"
+    test $__pb_on -eq 1; or return
+    set -l cols (tput cols 2>/dev/null; or echo 80)
+    set -l f (math "min(1, max(0, $frac))")
+    set -l pct (math "floor(100 * $f)")
+    set -l bw 40
+    set -l filled (math "round($bw * $f)")
+    set -l bar (string join '' (string repeat -n $filled '█') (string repeat -n (math "$bw - $filled") '░'))
+    set -l line (printf '%-11s %s %3d%%  %s' "$label" "$bar" $pct "$info")      # CHANGED: %-10s -> %-11s ("Compressing" is 11 chars)
+    set line (string shorten -m (math "$cols - 1") -- "$line")                  # CHANGED: was `string sub -l`; shorten is width-aware, so CJK file names (2 cells each) can't overflow the row
+    printf '\x1b7\x1b[%d;1H\x1b[2K%s\x1b8' $__pb_rows "$line"
+end
+
+function pb_stop
+    test $__pb_on -eq 1; or return
+    set -g __pb_on 0
+    printf '\x1b7\x1b[r\x1b8'
+    printf '\x1b7\x1b[%d;1H\x1b[2K\x1b8' $__pb_rows
+end
+
+function __pb_on_exit --on-event fish_exit
+    pb_stop
+end
+
+function __pb_on_int --on-signal INT
+    pb_stop
+    exit 130
+end
+
+function __pb_on_winch --on-signal WINCH
+    test $__pb_on -eq 1; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    printf '\x1b7\x1b[1;%dr\x1b8' (math $__pb_rows - 1)
+    pb_draw $__pb_state
+end
+# ──────────────────────────────────────────────────────────
 
 function show_help
     echo "Usage: pdf-to-png [-r] [-k] [-h]"
@@ -71,6 +113,17 @@ end
 
 set pdfs (printf '%s\n' $pdfs | sort -V)
 set total (count $pdfs)
+
+# one row per extractable image (pdfimages -list prints 2 header lines first)
+set pdf_units
+set total_units 0
+for p in $pdfs
+    set c (pdfimages -list -- "$p" 2>/dev/null | tail -n +3 | count)
+    test $c -ge 1; or set c 1
+    set -a pdf_units $c
+    set total_units (math $total_units + $c)
+end
+set done_units 0
 set n 1
 set processed_pdfs
 
@@ -88,13 +141,14 @@ echo ""
 
 set start_ns (date +%s%N)
 
+pb_start
+pb_draw 0 Extracting "0/$total"
+
 for pdf in $pdfs
     set dir (dirname -- "$pdf")
     set base (basename -- "$pdf")
     set name (string replace -r '(?i)\.pdf$' '' -- "$base")
     
-    progress_bar $n $total "Extracting" ""
-    echo ""
     echo "[$n/$total] Processing: $pdf"
 
     set out_dir "$dir/$name"
@@ -104,7 +158,14 @@ for pdf in $pdfs
     mkdir -p "$tmp_dir"
 
     # Extract native images as PNG
-    pdfimages -png -- "$pdf" "$tmp_dir/img"
+    pdfimages -png -- "$pdf" "$tmp_dir/img" &
+    set pdf_pid $last_pid
+    while kill -0 $pdf_pid 2>/dev/null
+        set k (find "$tmp_dir" -maxdepth 1 -type f | count)
+        pb_draw (math "min($done_units + $k, $total_units) / $total_units") Extracting "$n/$total  $name"
+        sleep 0.2
+    end
+    wait $pdf_pid
 
     set extracted (path filter -f "$tmp_dir/"* 2>/dev/null)
 
@@ -128,6 +189,8 @@ for pdf in $pdfs
     end
 
     rm -rf "$tmp_dir"
+    set done_units (math $done_units + $pdf_units[$n])
+    pb_draw (math "$done_units / $total_units") Extracting "$n/$total  $name"
     set n (math $n + 1)
 end
 
@@ -139,7 +202,8 @@ end
 set end_ns (date +%s%N)
 set total_seconds (math -s 2 "($end_ns - $start_ns) / 1000000000")
 
-printf "\r\033[K"
+pb_draw 1 Extracting "$total/$total  done"
+pb_stop
 echo "========================================"
 echo "SUMMARY"
 echo "========================================"

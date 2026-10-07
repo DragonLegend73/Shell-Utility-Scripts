@@ -30,16 +30,58 @@ function show_help
     echo "  -h, --help         Show this help and exit"
 end
 
-function progress_bar --argument-names current total label extra
-    set pct (math "floor(100 * $current / $total)")
-    set bar_w 30
-    set filled (math "round($bar_w * $current / $total)")
-    set empty (math "$bar_w - $filled")
-    set fill_str (string repeat -n (math "max(0, $filled)") '#')
-    set empty_str (string repeat -n (math "max(0, $empty)") '-')
-    printf "\r\033[K%-12s [%s%s]  %3d%%  (%d/%d)" "$label" "$fill_str" "$empty_str" $pct $current $total
-    test -n "$extra"; and printf "  %s" "$extra"
+# ───────────── pinned progress bar (bottom row) ─────────────
+set -g __pb_on 0
+set -g __pb_rows 0
+set -g __pb_state 0 "" ""
+
+function pb_start
+    isatty stdout; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    string match -qr '^\d+$' -- "$__pb_rows"; or return
+    test $__pb_rows -ge 5; or return
+    printf '\n\x1b7\x1b[1;%dr\x1b8\x1b[A' (math $__pb_rows - 1)
+    set -g __pb_on 1
 end
+
+# usage: pb_draw FRACTION(0..1) LABEL INFO
+function pb_draw --argument-names frac label info
+    set -g __pb_state $frac "$label" "$info"
+    test $__pb_on -eq 1; or return
+    set -l cols (tput cols 2>/dev/null; or echo 80)
+    set -l f (math "min(1, max(0, $frac))")
+    set -l pct (math "floor(100 * $f)")
+    set -l bw 40
+    set -l filled (math "round($bw * $f)")
+    set -l bar (string join '' (string repeat -n $filled '█') (string repeat -n (math "$bw - $filled") '░'))
+    set -l line (printf '%-11s %s %3d%%  %s' "$label" "$bar" $pct "$info")      # CHANGED: %-10s -> %-11s ("Compressing" is 11 chars)
+    set line (string shorten -m (math "$cols - 1") -- "$line")                  # CHANGED: was `string sub -l`; shorten is width-aware, so CJK file names (2 cells each) can't overflow the row
+    printf '\x1b7\x1b[%d;1H\x1b[2K%s\x1b8' $__pb_rows "$line"
+end
+
+function pb_stop
+    test $__pb_on -eq 1; or return
+    set -g __pb_on 0
+    printf '\x1b7\x1b[r\x1b8'
+    printf '\x1b7\x1b[%d;1H\x1b[2K\x1b8' $__pb_rows
+end
+
+function __pb_on_exit --on-event fish_exit
+    pb_stop
+end
+
+function __pb_on_int --on-signal INT
+    pb_stop
+    exit 130
+end
+
+function __pb_on_winch --on-signal WINCH
+    test $__pb_on -eq 1; or return
+    set -g __pb_rows (tput lines 2>/dev/null)
+    printf '\x1b7\x1b[1;%dr\x1b8' (math $__pb_rows - 1)
+    pb_draw $__pb_state
+end
+# ──────────────────────────────────────────────────────────
 
 argparse \
     'c/crf=' \
@@ -140,6 +182,26 @@ if test (count $input_videos) -eq 0
 end
 
 set input_videos (printf '%s\n' $input_videos | sort -V)
+
+# duration in seconds; falls back to 1 when ffprobe can't tell (some GIFs report N/A)
+function media_seconds --argument-names file
+    set -l d (ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 -- "$file" 2>/dev/null | head -n1)
+    if string match -qr '^\d+(\.\d+)?$' -- "$d"; and not string match -qr '^0+(\.0*)?$' -- "$d"
+        echo $d
+    else
+        echo 1
+    end
+end
+
+set durations
+set total_sec 0
+for v in $input_videos
+    set d (media_seconds "$v")
+    set -a durations $d
+    set total_sec (math $total_sec + $d)
+end
+set done_sec 0
+
 set total (count $input_videos)
 set processed 0
 set failed 0
@@ -168,6 +230,9 @@ echo ""
 
 set running_saved_bytes 0
 
+pb_start
+pb_draw 0 Compressing "0/$total"
+
 for v in $input_videos
     set processed (math $processed + 1)
     set dir (dirname -- "$v")
@@ -179,8 +244,6 @@ for v in $input_videos
     set total_source_bytes (math $total_source_bytes + $source_size)
 
     set running_saved_mib (printf "%.1f" (math "$running_saved_bytes / 1048576"))
-    progress_bar (math $processed - 1) $total "Compressing" "$running_saved_mib MiB saved"
-    echo ""
     echo "[$processed/$total] Encoding: $v"
 
     # Detect if this is a GIF (always no audio)
@@ -189,36 +252,36 @@ for v in $input_videos
         set is_gif 1
     end
 
-    if test $is_gif -eq 1
-        # GIF → AV1 (no audio)
-        ffmpeg -y -hide_banner -loglevel error -stats \
-            -i "$v" \
-            -c:v libsvtav1 -preset $preset -crf $crf \
-            -pix_fmt yuv420p10le -svtav1-params tune=0 \
-            -an \
-            -- "$out"
-    else
-        # Normal video
+    set audio_args -an
+    if test $is_gif -eq 0
         set has_audio (ffprobe -v error -select_streams a -show_entries stream=codec_type -of default=nw=1:nk=1 -- "$v" 2>/dev/null)
-
         if test -n "$has_audio"
-            ffmpeg -y -hide_banner -loglevel error -stats \
-                -i "$v" \
-                -c:v libsvtav1 -preset $preset -crf $crf \
-                -pix_fmt yuv420p10le -svtav1-params tune=0 \
-                -c:a libopus -b:a 128k \
-                -- "$out"
-        else
-            ffmpeg -y -hide_banner -loglevel error -stats \
-                -i "$v" \
-                -c:v libsvtav1 -preset $preset -crf $crf \
-                -pix_fmt yuv420p10le -svtav1-params tune=0 \
-                -an \
-                -- "$out"
+            set audio_args -c:a libopus -b:a 128k
         end
     end
 
-    set encode_status $status
+    set dur $durations[$processed]
+    set speed_txt ""
+
+    # -progress pipe:1 emits key=value blocks on stdout every ~0.5s; real errors still go to the terminal via stderr
+    ffmpeg -y -hide_banner -nostdin -loglevel error -nostats -progress pipe:1 \
+        -i "$v" \
+        -c:v libsvtav1 -preset $preset -crf $crf \
+        -pix_fmt yuv420p10le -svtav1-params tune=0 \
+        $audio_args \
+        -- "$out" | while read -l line
+        switch "$line"
+            case 'out_time_us=*' 'out_time_ms=*'      # (both are microseconds, despite the name)
+                set -l us (string replace -r '^out_time_(us|ms)=' '' -- "$line")
+                if string match -qr '^\d+$' -- "$us"
+                    set -l cur (math "$us / 1000000")
+                    pb_draw (math "($done_sec + min($cur, $dur)) / $total_sec") Compressing "$processed/$total  $running_saved_mib MiB saved  $speed_txt  $base"
+                end
+            case 'speed=*'
+                set speed_txt (string trim -- (string replace 'speed=' '' -- "$line"))
+        end
+    end
+    set encode_status $pipestatus[1]
 
     if test $encode_status -eq 0; and test -f "$out"
         set output_size (stat -c %s -- "$out")
@@ -254,16 +317,20 @@ for v in $input_videos
         echo "  -> ERROR: Failed to compress '$v'" >&2
         rm -f "$out"
     end
+    
+    set done_sec (math $done_sec + $dur)
+    set running_saved_mib (printf "%.1f" (math "$running_saved_bytes / 1048576"))
+    pb_draw (math "$done_sec / $total_sec") Compressing "$processed/$total  $running_saved_mib MiB saved"
 end
 
-set running_saved_mib (printf "%.1f" (math "$running_saved_bytes / 1048576"))
-progress_bar $total $total "Compressing" "$running_saved_mib MiB saved"
+pb_draw 1 Compressing "$total/$total  done"
+pb_stop
 
 set end_ns (date +%s%N)
 set total_seconds (math "($end_ns - $start_ns) / 1000000000")
 set successful (math $total - $failed)
 
-printf "\n\r\033[K\n"
+echo ""
 echo "========================================"
 echo "COMPRESSION SUMMARY"
 echo "========================================"
