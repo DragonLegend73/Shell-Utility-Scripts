@@ -7,21 +7,20 @@
 #
 # Metrics:
 #   size, BPP, reduction, encode time, throughput
-#   SSIM, PSNR                   (ImageMagick)
 #   SSIMULACRA 2                 (ssimulacra2 / ssimulacra2_rs / as2c / fssimu2)
 #
 # Generates results.csv + graphs when matplotlib is available.
 #
 # Phase 1: Encode all sample images at all qualities (sequential, avifenc
 #           already uses multiple cores internally).
-# Phase 2: Compute quality metrics in parallel with GNU parallel.
+# Phase 2: Compute SSIMULACRA 2 metrics in parallel with GNU parallel.
 
 set speed 6
 set sample_limit 5
 set ssimulacra_threshold 75
-set encoder_threads (math (nproc) - 2)
+set encoder_threads (math "min(8, (nproc) - 2)")
 test $encoder_threads -lt 1; and set encoder_threads 1
-set metric_jobs 3
+set metric_jobs 6
 set quality_list 30 40 50 60
 
 # ───────────── pinned progress bar (bottom row) ─────────────
@@ -159,7 +158,6 @@ if command -q python3
 end
 
 echo "Available metrics/tools:"
-echo "  SSIM / PSNR                   : ImageMagick"
 if test $has_ssimulacra -eq 1
     echo "  SSIMULACRA 2                  : available ($ssimulacra_cmd)"
 else
@@ -251,7 +249,7 @@ mkdir -p "$outdir" "$tmpdir" "$originals_dir"
 set csv "$outdir/results.csv"
 
 printf '%s\n' \
-    "quality,sample_count,source_mib,avif_mib,reduction_percent,bpp,total_encode_seconds,avg_encode_seconds,throughput_mib_s,avg_ssim,avg_psnr,avg_ssimulacra2" >"$csv"
+    "quality,sample_count,source_mib,avif_mib,reduction_percent,bpp,total_encode_seconds,avg_encode_seconds,throughput_mib_s,avg_ssimulacra2" >"$csv"
 
 echo "========================================"
 echo "AVIF QUALITY BENCHMARK"
@@ -330,69 +328,69 @@ echo "  Encoding complete."
 echo ""
 
 # -------------------------------------------------------------------
-# Phase 2: Parallel metric computation
+# Phase 2: Parallel SSIMULACRA 2 metric computation
 # -------------------------------------------------------------------
-echo "════════════════════════════════════════"
-echo "PHASE 2: Quality metrics (parallel)"
-echo "════════════════════════════════════════"
+if test $has_ssimulacra -eq 1
+    echo "════════════════════════════════════════"
+    echo "PHASE 2: SSIMULACRA 2 metrics (parallel)"
+    echo "════════════════════════════════════════"
 
-# Metric worker script (installed alongside benchmark-avif)
-set metric_script (command -s benchmark-avif-metric-worker)
-if not test -x "$metric_script"
-    echo "Error: benchmark-avif-metric-worker not found in PATH."
-    exit 1
-end
+    # Metric worker script (installed alongside benchmark-avif)
+    set metric_script (command -s benchmark-avif-metric-worker)
+    if not test -x "$metric_script"
+        echo "Error: benchmark-avif-metric-worker not found in PATH."
+        exit 1
+    end
 
-# Build job list for GNU parallel
-set job_list "$tmpdir/metric_jobs.txt"
-printf '' >"$job_list"
+    # Build job list for GNU parallel
+    set job_list "$tmpdir/metric_jobs.txt"
+    printf '' >"$job_list"
 
-set total_metric_jobs 0
-for quality in $quality_list
-    set quality_dir "$outdir/q$quality"
-    set image_number 0
+    set total_metric_jobs 0
+    for quality in $quality_list
+        set quality_dir "$outdir/q$quality"
+        set image_number 0
 
-    for f in $files
-        set image_number (math "$image_number + 1")
+        for f in $files
+            set image_number (math "$image_number + 1")
 
-        set filename (basename "$f")
-        set stem (string replace -r '(?i)\.(jpe?g|png)$' '' -- "$filename")
-        set output "$quality_dir/"(printf "%03d_%s.avif" $image_number "$stem")
+            set filename (basename "$f")
+            set stem (string replace -r '(?i)\.(jpe?g|png)$' '' -- "$filename")
+            set output "$quality_dir/"(printf "%03d_%s.avif" $image_number "$stem")
 
-        if test -f "$output"
-            set result_file "$tmpdir/metric_q"$quality"_"$image_number".txt"
-            set ssim_cmd_arg ""
-            set ssim_extra_arg ""
-            if test $has_ssimulacra -eq 1
-                set ssim_cmd_arg "$ssimulacra_cmd"
-                set ssim_extra_arg "$ssimulacra_extra_args"
+            if test -f "$output"
+                set result_file "$tmpdir/metric_q"$quality"_"$image_number".txt"
+                printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$output" "$result_file" "$ssimulacra_cmd" "$ssimulacra_extra_args" >>"$job_list"
+                set total_metric_jobs (math "$total_metric_jobs + 1")
             end
-            printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$output" "$result_file" "$ssim_cmd_arg" "$ssim_extra_arg" >>"$job_list"
-            set total_metric_jobs (math "$total_metric_jobs + 1")
         end
     end
+
+    echo "  Running $total_metric_jobs metric jobs across $metric_jobs workers..."
+
+    # Run parallel in background, suppress its progress output
+    parallel --colsep '\t' -j $metric_jobs \
+        bash "$metric_script" {1} {2} {3} {4} {5} <"$job_list" 2>/dev/null &
+    set parallel_pid $last_pid
+
+    set metric_total (math "max(1, $total_metric_jobs)")
+
+    while kill -0 $parallel_pid 2>/dev/null
+        set completed (count (path filter -f $tmpdir/metric_q*_*.txt 2>/dev/null))
+        pb_draw (math "$w_encode + $w_metrics * min($completed, $metric_total) / $metric_total") Metrics "$completed/$total_metric_jobs  $metric_jobs workers"
+        sleep 0.5
+    end
+    wait $parallel_pid
+
+    pb_draw 1 Metrics "$total_metric_jobs/$total_metric_jobs  done"
+    pb_stop
+    echo "  Metrics complete."
+    echo ""
+else
+    pb_stop
+    echo "  SSIMULACRA 2 not available — skipping quality metrics."
+    echo ""
 end
-
-echo "  Running $total_metric_jobs metric jobs across $metric_jobs workers..."
-
-# Run parallel in background, suppress its progress output
-parallel --colsep '\t' -j $metric_jobs \
-    bash "$metric_script" {1} {2} {3} {4} {5} <"$job_list" 2>/dev/null &
-set parallel_pid $last_pid
-
-set metric_total (math "max(1, $total_metric_jobs)")
-
-while kill -0 $parallel_pid 2>/dev/null
-    set completed (count (path filter -f $tmpdir/metric_q*_*.txt 2>/dev/null))
-    pb_draw (math "$w_encode + $w_metrics * min($completed, $metric_total) / $metric_total") Metrics "$completed/$total_metric_jobs  $metric_jobs workers"
-    sleep 0.5
-end
-wait $parallel_pid
-
-pb_draw 1 Metrics "$total_metric_jobs/$total_metric_jobs  done"
-pb_stop
-echo "  Metrics complete."
-echo ""
 
 # -------------------------------------------------------------------
 # Gather results per quality level
@@ -406,12 +404,7 @@ for quality in $quality_list
     set total_pixels 0
     set total_encode_seconds 0
 
-    set total_ssim 0
-    set total_psnr 0
     set total_ssimulacra 0
-
-    set count_ssim 0
-    set count_psnr 0
     set count_ssimulacra 0
 
     set image_number 0
@@ -427,7 +420,7 @@ for quality in $quality_list
         set output "$quality_dir/"(printf "%03d_%s.avif" $image_number "$stem")
 
         set source_size (stat -c %s -- "$f")
-        set dimensions (magick identify -format '%wx%h\n' -- "$f" 2>/dev/null | head -1)
+        set dimensions (magick identify -ping -format '%wx%h\n' -- "$f" 2>/dev/null | head -1)
         set width (string split 'x' -- "$dimensions")[1]
         set height (string split 'x' -- "$dimensions")[2]
 
@@ -449,39 +442,19 @@ for quality in $quality_list
         set output_size (stat -c %s -- "$output")
         set total_output_bytes (math "$total_output_bytes + $output_size")
 
-        # Read metric results
+        # Read SSIMULACRA 2 metric result
         set result_file "$tmpdir/metric_q"$quality"_"$image_number".txt"
         if test -f "$result_file"
-            set metric_line (cat "$result_file")
-            set metric_parts (string split '|' -- "$metric_line")
-
-            # SSIM
-            if test -n "$metric_parts[1]"
-                set total_ssim (math "$total_ssim + $metric_parts[1]")
-                set count_ssim (math "$count_ssim + 1")
-            end
-
-            # PSNR
-            if test -n "$metric_parts[2]"
-                set total_psnr (math "$total_psnr + $metric_parts[2]")
-                set count_psnr (math "$count_psnr + 1")
-            end
-
-            # SSIMULACRA 2
-            if test (count $metric_parts) -ge 3; and test -n "$metric_parts[3]"
-                set total_ssimulacra (math "$total_ssimulacra + $metric_parts[3]")
+            set metric_val (string trim -- (cat "$result_file"))
+            if test -n "$metric_val"
+                set total_ssimulacra (math "$total_ssimulacra + $metric_val")
                 set count_ssimulacra (math "$count_ssimulacra + 1")
             end
         end
     end
 
     # Averages
-    set avg_ssim ""
-    set avg_psnr ""
     set avg_ssimulacra ""
-
-    test $count_ssim -gt 0; and set avg_ssim (math "$total_ssim / $count_ssim")
-    test $count_psnr -gt 0; and set avg_psnr (math "$total_psnr / $count_psnr")
     test $count_ssimulacra -gt 0; and set avg_ssimulacra (math "$total_ssimulacra / $count_ssimulacra")
 
     set source_mib (math "$total_source_bytes / 1048576")
@@ -499,11 +472,17 @@ for quality in $quality_list
     set throughput 0
     test $total_encode_seconds -gt 0; and set throughput (math "$source_mib / $total_encode_seconds")
 
+    # Pre-format optional values for CSV
+    set bpp_str ""
+    test -n "$bpp"; and set bpp_str (printf "%.2f" $bpp)
+    set ssimulacra_str ""
+    test -n "$avg_ssimulacra"; and set ssimulacra_str (printf "%.2f" $avg_ssimulacra)
+
     # CSV row
-    printf "%s,%d,%.6f,%.6f,%.6f,%s,%.6f,%.6f,%.6f,%s,%s,%s\n" \
+    printf "%s,%d,%.2f,%.2f,%.2f,%s,%.2f,%.2f,%.2f,%s\n" \
         "$quality" "$sample_count" "$source_mib" "$output_mib" "$reduction" \
-        "$bpp" "$total_encode_seconds" "$avg_encode" "$throughput" \
-        "$avg_ssim" "$avg_psnr" "$avg_ssimulacra" >>"$csv"
+        "$bpp_str" "$total_encode_seconds" "$avg_encode" "$throughput" \
+        "$ssimulacra_str" >>"$csv"
 
     # Human summary
     echo "────────────────────────────────────────"
@@ -511,13 +490,11 @@ for quality in $quality_list
     echo "────────────────────────────────────────"
     echo "  AVIF size:          "(printf "%.2f" $output_mib)" MiB"
     echo "  Reduction:          "(printf "%.2f" $reduction)" %"
-    test -n "$bpp"; and echo "  BPP:                "(printf "%.4f" $bpp)
+    test -n "$bpp"; and echo "  BPP:                "(printf "%.2f" $bpp)
     echo "  Total encode:       "(printf "%.2f" $total_encode_seconds)" s"
-    echo "  Avg/image:          "(printf "%.3f" $avg_encode)" s"
+    echo "  Avg/image:          "(printf "%.2f" $avg_encode)" s"
     echo "  Throughput:         "(printf "%.2f" $throughput)" MiB/s"
-    test -n "$avg_ssimulacra"; and echo "  SSIMULACRA 2:       "(printf "%.3f" $avg_ssimulacra)
-    test -n "$avg_ssim"; and echo "  SSIM:               "(printf "%.6f" $avg_ssim)
-    test -n "$avg_psnr"; and echo "  PSNR:               "(printf "%.3f" $avg_psnr)" dB"
+    test -n "$avg_ssimulacra"; and echo "  SSIMULACRA 2:       "(printf "%.2f" $avg_ssimulacra)
 end
 
 # -------------------------------------------------------------------
@@ -533,8 +510,8 @@ echo ""
 
 if test $has_ssimulacra -eq 1
     set recommended (awk -F ',' -v threshold="$ssimulacra_threshold" '
-        NR > 1 && $12 != "" && ($12 + 0) >= threshold {
-            print $1 "," $12
+        NR > 1 && $10 != "" && ($10 + 0) >= threshold {
+            print $1 "," $10
             exit
         }
     ' "$csv")
