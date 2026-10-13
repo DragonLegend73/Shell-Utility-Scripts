@@ -250,7 +250,7 @@ mkdir -p "$outdir" "$tmpdir" "$originals_dir"
 set csv "$outdir/results.csv"
 
 printf '%s\n' \
-    "quality,sample_count,source_mib,avif_mib,bpp,total_encode_seconds,avg_encode_seconds,throughput_mib_s,reduction_percent,avg_ssimulacra2" >"$csv"
+    "sample_count,source_mib,avif_mib,bpp,total_encode_seconds,avg_encode_seconds,throughput_mib_s,reduction_percent,avg_ssimulacra2,quality" >"$csv"
 
 echo "========================================"
 echo "AVIF QUALITY BENCHMARK"
@@ -480,10 +480,10 @@ for quality in $quality_list
     test -n "$avg_ssimulacra"; and set ssimulacra_str (printf "%.2f" $avg_ssimulacra)
 
     # CSV row
-    printf "%s,%.2f,%d,%.2f,%.2f,%s,%.2f,%.2f,%.2f,%s\n" \
-        "$quality" "$reduction" "$sample_count" "$source_mib" "$output_mib" \
+    printf "%d,%.2f,%.2f,%s,%.2f,%.2f,%.2f,%.2f,%s,%s\n" \
+        "$sample_count" "$source_mib" "$output_mib" \
         "$bpp_str" "$total_encode_seconds" "$avg_encode" "$throughput" \
-        "$ssimulacra_str" >>"$csv"
+        "$reduction" "$ssimulacra_str" "$quality" >>"$csv"
 
     # Human summary
     echo "────────────────────────────────────────"
@@ -511,8 +511,8 @@ echo ""
 
 if test $has_ssimulacra -eq 1
     set recommended (awk -F ',' -v threshold="$ssimulacra_threshold" '
-        NR > 1 && $10 != "" && ($10 + 0) >= threshold {
-            print $1 "," $10
+        NR > 1 && $9 != "" && ($9 + 0) >= threshold {
+            print $10 "," $9
             exit
         }
     ' "$csv")
