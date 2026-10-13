@@ -250,7 +250,7 @@ mkdir -p "$outdir" "$tmpdir" "$originals_dir"
 set csv "$outdir/results.csv"
 
 printf '%s\n' \
-    "quality,sample_count,source_mib,avif_mib,reduction_percent,bpp,total_encode_seconds,avg_encode_seconds,throughput_mib_s,avg_ssimulacra2" >"$csv"
+    "quality,reduction_percent,sample_count,source_mib,avif_mib,bpp,total_encode_seconds,avg_encode_seconds,throughput_mib_s,avg_ssimulacra2" >"$csv"
 
 echo "========================================"
 echo "AVIF QUALITY BENCHMARK"
