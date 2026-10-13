@@ -21,7 +21,7 @@ set ssimulacra_threshold 75
 set encoder_threads (math (nproc) - 2)
 test $encoder_threads -lt 1; and set encoder_threads 1
 test $encoder_threads -gt 8; and set encoder_threads 8
-set metric_jobs 6
+set metric_jobs 3
 set quality_list 30 40 50 60
 
 # ───────────── pinned progress bar (bottom row) ─────────────
