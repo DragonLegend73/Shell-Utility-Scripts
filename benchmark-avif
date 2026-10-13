@@ -250,7 +250,7 @@ mkdir -p "$outdir" "$tmpdir" "$originals_dir"
 set csv "$outdir/results.csv"
 
 printf '%s\n' \
-    "quality,reduction_percent,sample_count,source_mib,avif_mib,bpp,total_encode_seconds,avg_encode_seconds,throughput_mib_s,avg_ssimulacra2" >"$csv"
+    "quality,sample_count,source_mib,avif_mib,bpp,total_encode_seconds,avg_encode_seconds,throughput_mib_s,reduction_percent,avg_ssimulacra2" >"$csv"
 
 echo "========================================"
 echo "AVIF QUALITY BENCHMARK"
@@ -480,8 +480,8 @@ for quality in $quality_list
     test -n "$avg_ssimulacra"; and set ssimulacra_str (printf "%.2f" $avg_ssimulacra)
 
     # CSV row
-    printf "%s,%d,%.2f,%.2f,%.2f,%s,%.2f,%.2f,%.2f,%s\n" \
-        "$quality" "$sample_count" "$source_mib" "$output_mib" "$reduction" \
+    printf "%s,%.2f,%d,%.2f,%.2f,%s,%.2f,%.2f,%.2f,%s\n" \
+        "$quality" "$reduction" "$sample_count" "$source_mib" "$output_mib" \
         "$bpp_str" "$total_encode_seconds" "$avg_encode" "$throughput" \
         "$ssimulacra_str" >>"$csv"
 
